@@ -1,6 +1,6 @@
 {
   "name": "@ubermensch1218/freestack",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bootstrap your startup workspace using free cloud tiers",
   "type": "module",
   "bin": {
@@ -9,7 +9,15 @@
   "files": [
     "dist/**/*"
   ],
-  "keywords": ["startup", "free-tier", "cloud", "cli", "workspace", "openclaw", "ai-agent"],
+  "keywords": [
+    "startup",
+    "free-tier",
+    "cloud",
+    "cli",
+    "workspace",
+    "openclaw",
+    "ai-agent"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
