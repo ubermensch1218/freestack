@@ -1,5 +1,5 @@
 {
-  "name": "freestack",
+  "name": "@ubermensch1218/freestack",
   "version": "0.1.0",
   "description": "Bootstrap your startup workspace using free cloud tiers",
   "type": "module",
