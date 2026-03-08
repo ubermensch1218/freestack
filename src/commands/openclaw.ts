@@ -42,8 +42,8 @@ const RUNTIMES: Record<AgentRuntime, RuntimeConfig> = {
   nanobot: {
     id: 'nanobot',
     name: 'Nanobot (HKUDS)',
-    image: 'ghcr.io/hkuds/nanobot:latest',
-    port: 3210,
+    image: 'smanx/nanobot:latest',
+    port: 18790,
     dirName: 'nanobot',
     lang: 'Python',
     installCmd: 'pip install nanobot-ai',
@@ -130,8 +130,41 @@ agentCommand
     console.log();
     ui.heading('AI 에이전트 배포');
 
+    // 이전 설정이 있으면 이어하기 옵션
+    const saved = config.get('openclaw') as any;
+    let rt: RuntimeConfig | undefined;
+
+    if (saved?.serverIp && saved?.runtime) {
+      const savedRt = RUNTIMES[saved.runtime as AgentRuntime] || RUNTIMES.nanobot;
+      const { resume } = await inquirer.prompt([{
+        type: 'list',
+        name: 'resume',
+        message: `이전 설정 발견 (${savedRt.name} → ${saved.serverIp}):`,
+        choices: [
+          { name: `이어하기 — ${savedRt.name}, ${saved.type === 'homeserver' ? '홈서버' : '원격VM'} ${saved.serverIp}`, value: 'continue' },
+          { name: '처음부터 새로 설정', value: 'fresh' },
+          { name: '📋 클라우드 가격 비교 보기', value: 'info' },
+        ],
+      }]);
+
+      if (resume === 'info') {
+        showCloudPricing();
+        return;
+      }
+
+      if (resume === 'continue') {
+        rt = savedRt;
+        if (saved.type === 'homeserver') {
+          await deployHomeServer(rt, saved);
+        } else {
+          await deployRemoteLinux(rt, saved);
+        }
+        return;
+      }
+    }
+
     // 1) 런타임 선택
-    const rt = await selectRuntime();
+    rt = await selectRuntime();
     console.log();
     ui.success(`런타임: ${rt.name} (${rt.lang}, ${rt.description})`);
     console.log();
@@ -142,7 +175,7 @@ agentCommand
       name: 'target',
       message: '배포 대상 선택:',
       choices: [
-        { name: `🏠 홈서버 (Tailscale) — ${chalk.green('$0/월')}, Docker Desktop + Ollama (GPU)`, value: 'homeserver' },
+        { name: `🏠 홈서버 (Tailscale/로컬) — ${chalk.green('$0/월')}`, value: 'homeserver' },
         { name: `🖥️  원격 Linux VM (SSH) — Oracle/AWS/GCP/Hetzner 등`, value: 'remote-linux' },
         { name: `📋 클라우드 가격 비교 보기`, value: 'info' },
       ],
@@ -162,25 +195,201 @@ agentCommand
 
 // ─── Home server deploy (Tailscale + Docker Desktop) ───
 
-async function deployHomeServer(rt: RuntimeConfig) {
-  ui.heading(`${rt.name} — 홈서버 배포 (Tailscale 경유)`);
-  console.log();
-  ui.info('홈서버 요구사항:');
-  ui.info('  • Tailscale 설치 + 로그인');
-  ui.info('  • Docker Desktop (Windows) 또는 Docker Engine (Linux)');
-  ui.info('  • Ollama 네이티브 설치 (GPU 사용 시)');
+interface TailscalePeer {
+  name: string;
+  ip: string;
+  os: string;
+  online: boolean;
+  self: boolean;
+}
+
+function getTailscalePeers(): TailscalePeer[] {
+  try {
+    const raw = execSync('tailscale status --json', { encoding: 'utf-8', timeout: 10000 });
+    const data = JSON.parse(raw);
+    const selfId = data.Self?.ID;
+    const peers: TailscalePeer[] = [];
+
+    // Self
+    if (data.Self) {
+      peers.push({
+        name: data.Self.HostName || 'this-machine',
+        ip: data.Self.TailscaleIPs?.[0] || '',
+        os: data.Self.OS || '',
+        online: true,
+        self: true,
+      });
+    }
+
+    // Peers
+    if (data.Peer) {
+      for (const peer of Object.values(data.Peer) as any[]) {
+        peers.push({
+          name: peer.HostName || peer.DNSName?.split('.')[0] || 'unknown',
+          ip: peer.TailscaleIPs?.[0] || '',
+          os: peer.OS || '',
+          online: peer.Online ?? false,
+          self: false,
+        });
+      }
+    }
+
+    return peers;
+  } catch {
+    return [];
+  }
+}
+
+function isTailscaleInstalled(): boolean {
+  try {
+    execSync('which tailscale', { encoding: 'utf-8', timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function deployHomeServer(rt: RuntimeConfig, resumeConfig?: any) {
+  ui.heading(`${rt.name} — 홈서버 배포`);
   console.log();
 
-  const ocConfig = config.get('openclaw') as any;
+  const ocConfig = resumeConfig || (config.get('openclaw') as any) || {};
 
-  const answers = await inquirer.prompt([
-    {
+  // 이어하기면 기존 값으로 직행
+  if (resumeConfig) {
+    ui.success(`이전 설정으로 이어하기: ${ocConfig.serverIp} (${ocConfig.sshUser})`);
+    console.log();
+    await collectAllLLMKeys();
+    await collectChannelKeys();
+    const keys = getAllKeys();
+    const apiKey = keys.anthropic || ocConfig.anthropicKey || '';
+    const answers = {
+      tailscaleIp: ocConfig.tailscaleIp || ocConfig.serverIp,
+      sshUser: ocConfig.sshUser,
+      os: ocConfig.os || 'windows',
+      provider: ocConfig.provider || 'anthropic',
+      ollamaModel: ocConfig.ollamaModel,
+    };
+    // SSH → Docker → 배포 (아래 공통 로직으로 fall-through)
+    const sshSpinner = ora('Tailscale SSH 연결 확인 중...').start();
+    try {
+      const result = execSync(
+        `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${answers.sshUser}@${answers.tailscaleIp} "echo ok"`,
+        { encoding: 'utf-8', timeout: 15000 },
+      );
+      if (!result.includes('ok')) throw new Error('응답 없음');
+      sshSpinner.succeed('SSH 연결 성공');
+    } catch {
+      sshSpinner.fail('SSH 연결 실패');
+      printHomeServerManual(answers, apiKey, rt);
+      return;
+    }
+    // Docker 확인 & 배포
+    const dockerSpinner2 = ora('Docker 확인 중...').start();
+    try {
+      sshExec(answers.tailscaleIp, 'docker --version', undefined, answers.sshUser);
+      dockerSpinner2.succeed('Docker 확인됨');
+    } catch {
+      dockerSpinner2.fail('Docker 없음');
+      printHomeServerManual(answers, apiKey, rt);
+      return;
+    }
+    const clawSpinner2 = ora(`${rt.name} 배포 중...`).start();
+    try {
+      const envVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel, rt);
+      const compose = buildDockerCompose(envVars, '4g', rt);
+      sshExec(answers.tailscaleIp,
+        `mkdir -p ~/${rt.dirName} && cat > ~/${rt.dirName}/docker-compose.yml << 'COMPOSEEOF'\n${compose}\nCOMPOSEEOF`,
+        undefined, answers.sshUser);
+      sshExec(answers.tailscaleIp, `cd ~/${rt.dirName} && docker compose pull && docker compose up -d`,
+        undefined, answers.sshUser);
+      clawSpinner2.succeed(`${rt.name} 배포 완료!`);
+    } catch (e: any) {
+      clawSpinner2.fail(`배포 실패: ${e.message}`);
+      printHomeServerManual(answers, apiKey, rt);
+    }
+    return;
+  }
+
+  // ─── 1) Tailscale 자동 감지 ───
+  const tsSpinner = ora('Tailscale 상태 확인 중...').start();
+
+  if (!isTailscaleInstalled()) {
+    tsSpinner.text = 'Tailscale 설치 중...';
+    try {
+      if (process.platform === 'darwin') {
+        execSync('brew install tailscale', { encoding: 'utf-8', timeout: 120000 });
+      } else {
+        execSync('curl -fsSL https://tailscale.com/install.sh | sh', { encoding: 'utf-8', timeout: 120000 });
+      }
+      tsSpinner.succeed('Tailscale 설치 완료');
+
+      // 로그인 안내
+      ui.info('Tailscale 로그인이 필요합니다:');
+      console.log(chalk.cyan('  sudo tailscale up'));
+      console.log();
+      const { loggedIn } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'loggedIn',
+        message: 'tailscale up 실행 후 로그인 완료했나요?',
+        default: false,
+      }]);
+      if (!loggedIn) {
+        ui.info('tailscale up 실행 후 다시 freestack agent deploy 하세요.');
+        return;
+      }
+    } catch (e: any) {
+      tsSpinner.fail(`Tailscale 설치 실패: ${e.message}`);
+      ui.info('수동 설치: https://tailscale.com/download');
+      return;
+    }
+  }
+
+  const peers = getTailscalePeers();
+  if (peers.length === 0) {
+    tsSpinner.fail('Tailscale에 연결된 기기가 없습니다.');
+    ui.info('tailscale up 으로 로그인하세요.');
+    return;
+  }
+
+  const self = peers.find(p => p.self);
+  const remotePeers = peers.filter(p => !p.self && p.online);
+  tsSpinner.succeed(`Tailscale 연결됨 (내 기기: ${self?.name || '?'}, 피어 ${remotePeers.length}대 온라인)`);
+  console.log();
+
+  // ─── 2) 타겟 기기 선택 ───
+  const peerChoices = remotePeers.map(p => ({
+    name: `${p.name} — ${p.ip} (${p.os})`,
+    value: p.ip,
+  }));
+  peerChoices.push({ name: chalk.dim('직접 IP 입력'), value: '__manual__' });
+
+  const { targetIp } = await inquirer.prompt([{
+    type: 'list',
+    name: 'targetIp',
+    message: '배포할 홈서버 선택:',
+    choices: peerChoices,
+  }]);
+
+  let tailscaleIp = targetIp;
+  if (targetIp === '__manual__') {
+    const { manualIp } = await inquirer.prompt([{
       type: 'input',
-      name: 'tailscaleIp',
-      message: '홈서버 Tailscale IP (100.x.x.x):',
+      name: 'manualIp',
+      message: 'Tailscale IP:',
       default: ocConfig?.tailscaleIp,
       validate: (v: string) => /^\d+\.\d+\.\d+\.\d+$/.test(v) || 'IP 주소 형식',
-    },
+    }]);
+    tailscaleIp = manualIp;
+  }
+
+  // 선택한 피어의 OS 자동 감지
+  const selectedPeer = peers.find(p => p.ip === tailscaleIp);
+  const detectedOs = selectedPeer?.os?.toLowerCase().includes('windows') ? 'windows'
+    : selectedPeer?.os?.toLowerCase().includes('macos') ? 'macos' : 'linux';
+
+  // ─── 3) SSH 유저명 + OS 확인 ───
+  const { sshUser, os } = await inquirer.prompt([
     {
       type: 'input',
       name: 'sshUser',
@@ -192,22 +401,102 @@ async function deployHomeServer(rt: RuntimeConfig) {
       name: 'os',
       message: '홈서버 OS:',
       choices: [
-        { name: 'Windows (Docker Desktop + WSL2)', value: 'windows' },
+        { name: 'Windows (WSL2)', value: 'windows' },
         { name: 'Linux', value: 'linux' },
         { name: 'macOS', value: 'macos' },
       ],
-      default: 'windows',
+      default: detectedOs,
     },
+  ]);
+
+  // ─── 4) Prerequisites: SSH 연결 → Docker 설치 확인 ───
+  console.log();
+  ui.heading('서버 환경 확인');
+
+  const sshSpinner = ora('SSH 연결 확인 중...').start();
+  try {
+    const result = execSync(
+      `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${sshUser}@${tailscaleIp} "echo ok"`,
+      { encoding: 'utf-8', timeout: 15000 },
+    );
+    if (!result.includes('ok')) throw new Error('응답 없음');
+    sshSpinner.succeed('SSH 연결 성공');
+  } catch {
+    sshSpinner.fail('SSH 연결 실패');
+    ui.info('홈서버에서 Tailscale SSH 활성화:');
+    console.log(chalk.cyan('  tailscale up --ssh'));
+    ui.info('또는 SSH 서버 설치:');
+    console.log(chalk.cyan('  sudo apt install openssh-server && sudo systemctl enable ssh'));
+    return;
+  }
+
+  // Docker 확인 & 자동 설치
+  const dockerSpinner = ora('Docker 확인 중...').start();
+  try {
+    sshExec(tailscaleIp, 'docker --version', undefined, sshUser);
+    dockerSpinner.succeed('Docker 설치 확인');
+  } catch {
+    dockerSpinner.text = 'Docker 설치 중...';
+    if (os === 'windows') {
+      // WSL2 안에서 docker.io 설치
+      try {
+        sshExec(tailscaleIp, 'sudo apt-get update -qq && sudo apt-get install -y -qq docker.io docker-compose-v2 && sudo usermod -aG docker $(whoami)', undefined, sshUser);
+        dockerSpinner.succeed('Docker 설치 완료 (WSL2)');
+      } catch (e: any) {
+        dockerSpinner.fail(`Docker 설치 실패: ${e.message}`);
+        ui.info('수동 설치: sudo apt install docker.io docker-compose-v2');
+        return;
+      }
+    } else if (os === 'macos') {
+      dockerSpinner.fail('Docker Desktop을 수동으로 설치해주세요.');
+      ui.info('https://www.docker.com/products/docker-desktop/');
+      return;
+    } else {
+      try {
+        sshExec(tailscaleIp, 'sudo apt-get update -qq && sudo apt-get install -y -qq docker.io docker-compose-v2 && sudo usermod -aG docker $(whoami)', undefined, sshUser);
+        dockerSpinner.succeed('Docker 설치 완료');
+      } catch (e: any) {
+        dockerSpinner.fail(`Docker 설치 실패: ${e.message}`);
+        return;
+      }
+    }
+  }
+
+  // docker compose 동작 확인
+  try {
+    sshExec(tailscaleIp, 'docker compose version', undefined, sshUser);
+  } catch {
+    ui.warn('docker compose를 사용할 수 없습니다. newgrp docker 또는 재로그인이 필요할 수 있습니다.');
+  }
+
+  ui.success('서버 환경 준비 완료!');
+  console.log();
+
+  // 중간 저장 (여기까지 성공)
+  config.set('openclaw' as any, {
+    ...ocConfig,
+    type: 'homeserver',
+    runtime: rt.id,
+    tailscaleIp,
+    sshUser,
+    serverIp: tailscaleIp,
+    os,
+  });
+
+  // ─── 5) AI 프로바이더 + LLM 키 수집 ───
+  ui.heading('AI 설정');
+
+  const { provider, ollamaModel } = await inquirer.prompt([
     {
       type: 'list',
       name: 'provider',
       message: 'AI 프로바이더:',
       choices: [
-        { name: `Ollama (로컬 GPU) + Claude API 폴백 — ${chalk.green('추천 (GPU 24GB)')}`, value: 'both' },
+        { name: `API 키 (Claude, OpenAI, Gemini, Kimi, GLM 등) — ${chalk.green('추천')}`, value: 'anthropic' },
+        { name: 'API + Ollama 병행 (로컬 GPU + API 폴백)', value: 'both' },
         { name: 'Ollama만 (로컬 GPU, API 비용 $0)', value: 'ollama' },
-        { name: 'Claude API만 (Anthropic)', value: 'anthropic' },
       ],
-      default: 'both',
+      default: ocConfig?.provider || 'anthropic',
     },
     {
       type: 'input',
@@ -219,70 +508,29 @@ async function deployHomeServer(rt: RuntimeConfig) {
   ]);
 
   let apiKey = ocConfig?.anthropicKey || '';
-  if (answers.provider !== 'ollama') {
-    const keyAnswer = await inquirer.prompt([{
-      type: 'input',
-      name: 'apiKey',
-      message: 'Anthropic API Key:',
-      default: apiKey || undefined,
-      validate: (v: string) => !v || v.startsWith('sk-ant-') || 'sk-ant-로 시작 (건너뛰려면 빈칸)',
-    }]);
-    apiKey = keyAnswer.apiKey;
+  if (provider !== 'ollama') {
+    await collectAllLLMKeys();
+    const keys = getAllKeys();
+    apiKey = keys.anthropic || apiKey;
   }
-
-  // 추가 LLM 프로바이더 키 수집
-  await collectExtraLLMKeys();
 
   // 채널 봇 토큰 수집
   await collectChannelKeys();
 
-  // Save config
+  // 최종 config 저장
+  const answers = { tailscaleIp, sshUser, os, provider, ollamaModel };
   config.set('openclaw' as any, {
     ...ocConfig,
     type: 'homeserver',
     runtime: rt.id,
-    tailscaleIp: answers.tailscaleIp,
-    sshUser: answers.sshUser,
-    serverIp: answers.tailscaleIp,
-    os: answers.os,
-    provider: answers.provider,
+    tailscaleIp,
+    sshUser,
+    serverIp: tailscaleIp,
+    os,
+    provider,
     anthropicKey: apiKey || undefined,
-    ollamaModel: answers.ollamaModel || 'llama3.2',
+    ollamaModel: ollamaModel || 'llama3.2',
   });
-
-  // Test Tailscale SSH
-  const sshSpinner = ora('Tailscale SSH 연결 확인 중...').start();
-  try {
-    const result = execSync(
-      `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${answers.sshUser}@${answers.tailscaleIp} "echo ok"`,
-      { encoding: 'utf-8', timeout: 15000 },
-    );
-    if (!result.includes('ok')) throw new Error('응답 없음');
-    sshSpinner.succeed('Tailscale SSH 연결 성공');
-  } catch {
-    sshSpinner.warn('SSH 직접 연결 실패 — Tailscale SSH가 활성화되어 있는지 확인하세요.');
-    ui.info('  tailscale up --ssh    (홈서버에서 실행)');
-    ui.info('  또는 홈서버에서 직접 아래 명령어를 실행하세요:');
-    console.log();
-    printHomeServerManual(answers, apiKey, rt);
-    return;
-  }
-
-  // Check Docker
-  const dockerSpinner = ora('Docker 확인 중...').start();
-  try {
-    sshExec(answers.tailscaleIp, 'docker --version', undefined, answers.sshUser);
-    dockerSpinner.succeed('Docker 설치 확인');
-  } catch {
-    dockerSpinner.warn('Docker가 설치되어 있지 않거나 접근 불가');
-    if (answers.os === 'windows') {
-      ui.info('Docker Desktop 설치: https://www.docker.com/products/docker-desktop/');
-      ui.info('설치 후 WSL2 백엔드 활성화 필요');
-    }
-    console.log();
-    printHomeServerManual(answers, apiKey, rt);
-    return;
-  }
 
   // Deploy via docker-compose
   const clawSpinner = ora(`${rt.name} 배포 중...`).start();
@@ -380,7 +628,7 @@ function printHomeServerManual(answers: any, apiKey: string, rt: RuntimeConfig) 
 
 // ─── Remote Linux VM deploy (existing logic) ───
 
-async function deployRemoteLinux(rt: RuntimeConfig) {
+async function deployRemoteLinux(rt: RuntimeConfig, resumeConfig?: any) {
   ui.heading(`${rt.name} — 원격 Linux VM 배포 (SSH)`);
   console.log();
 
@@ -411,9 +659,9 @@ async function deployRemoteLinux(rt: RuntimeConfig) {
       name: 'provider',
       message: 'AI 프로바이더:',
       choices: [
-        { name: 'Claude API (Anthropic)', value: 'anthropic' },
-        { name: 'Ollama (로컬) — ARM VM 24GB+ 권장', value: 'ollama' },
-        { name: '둘 다 (Claude 기본 + Ollama 폴백)', value: 'both' },
+        { name: `API 키 (Claude, OpenAI, Gemini, Kimi, GLM 등) — ${chalk.green('추천')}`, value: 'anthropic' },
+        { name: 'API + Ollama 병행 (로컬 GPU + API 폴백)', value: 'both' },
+        { name: 'Ollama만 (로컬 GPU, API 비용 $0)', value: 'ollama' },
       ],
       default: 'anthropic',
     },
@@ -626,12 +874,15 @@ function buildEnvVars(provider: string, apiKey: string, ollamaModel?: string, rt
 
 // ─── LLM & 채널 키 수집 ───
 
-const EXTRA_LLM_PROVIDERS = [
-  { id: 'openai',  name: 'OpenAI',        envVar: 'OPENAI_API_KEY',   prefix: 'sk-',  hint: 'GPT-4o 등, 폴백용' },
-  { id: 'google',  name: 'Google Gemini',  envVar: 'GOOGLE_API_KEY',   prefix: '',     hint: 'Gemini Pro, 무료 티어 있음' },
+const ALL_LLM_PROVIDERS = [
+  { id: 'anthropic', name: 'Claude (Anthropic)', envVar: 'ANTHROPIC_API_KEY', prefix: 'sk-ant-', hint: '기본 LLM' },
+  { id: 'openai',  name: 'OpenAI',        envVar: 'OPENAI_API_KEY',   prefix: 'sk-',  hint: 'GPT-4o 등' },
+  { id: 'google',  name: 'Google Gemini',  envVar: 'GOOGLE_API_KEY',   prefix: '',     hint: 'Gemini, 무료 티어 있음' },
   { id: 'kimi',    name: 'Kimi (Moonshot)', envVar: 'MOONSHOT_API_KEY', prefix: 'sk-',  hint: '중국 LLM, 저렴' },
   { id: 'glm',     name: 'GLM (Zhipu)',    envVar: 'ZHIPU_API_KEY',    prefix: '',     hint: '중국 LLM, 저렴' },
 ];
+
+const EXTRA_LLM_PROVIDERS = ALL_LLM_PROVIDERS.filter(p => p.id !== 'anthropic');
 
 const CHANNEL_TOKENS = [
   { id: 'telegram',   name: 'Telegram Bot Token',  envVar: 'TELEGRAM_BOT_TOKEN',  prefix: '',     hint: '@BotFather에서 발급' },
@@ -639,6 +890,58 @@ const CHANNEL_TOKENS = [
   { id: 'slackApp',   name: 'Slack App Token',      envVar: 'SLACK_APP_TOKEN',     prefix: 'xapp-', hint: 'Socket Mode용' },
   { id: 'discordBot', name: 'Discord Bot Token',    envVar: 'DISCORD_BOT_TOKEN',   prefix: '',     hint: 'discord.com/developers' },
 ];
+
+async function collectAllLLMKeys() {
+  const keys = getAllKeys();
+
+  console.log();
+  ui.heading('LLM API 키 등록');
+  console.log(chalk.dim('  조작: ↑↓ 이동 / Space 선택·해제 / a 전체선택 / Enter 확인'));
+  console.log();
+
+  // 전체 프로바이더를 보여주되, 이미 등록된 건 체크 + 표시
+  const { selected } = await inquirer.prompt([{
+    type: 'checkbox',
+    name: 'selected',
+    message: '사용할 LLM 선택:',
+    choices: ALL_LLM_PROVIDERS.map(p => {
+      const registered = !!keys[p.id];
+      return {
+        name: registered
+          ? `${p.name} — ${chalk.green('✓ 등록됨')}`
+          : `${p.name} — ${chalk.dim(p.hint)}`,
+        value: p.id,
+        checked: registered || p.id === 'anthropic',
+      };
+    }),
+  }]);
+
+  if (selected.length === 0) {
+    ui.warn('LLM이 선택되지 않았습니다. 나중에 freestack keys set 으로 등록하세요.');
+    return;
+  }
+
+  // 선택됐는데 키가 없는 것만 입력 요청
+  for (const id of selected) {
+    if (keys[id]) continue; // 이미 등록됨 → 건너뜀
+    const p = ALL_LLM_PROVIDERS.find(x => x.id === id)!;
+    const { value } = await inquirer.prompt([{
+      type: 'input',
+      name: 'value',
+      message: `${p.name} API Key${p.prefix ? ` (${p.prefix}...)` : ''}:`,
+      validate: (v: string) => {
+        if (!v) return '키를 입력하세요 (건너뛰려면 Ctrl+C 후 재실행)';
+        if (p.prefix && !v.startsWith(p.prefix)) return `${p.prefix}로 시작해야 합니다`;
+        return true;
+      },
+    }]);
+    if (value?.trim()) {
+      keys[p.id] = value.trim();
+      config.set('keys' as any, keys);
+      ui.success(`${p.name} 저장됨`);
+    }
+  }
+}
 
 async function collectExtraLLMKeys() {
   const keys = getAllKeys();
@@ -710,7 +1013,7 @@ async function collectChannelKeys() {
 
   console.log();
   ui.heading('채널 봇 토큰 (메시징 연동)');
-  ui.info('Telegram/Slack/Discord로 OpenClaw에 명령을 보내려면 봇 토큰이 필요합니다.');
+  ui.info('Telegram/Slack/Discord로 에이전트에 명령을 보내려면 봇 토큰이 필요합니다.');
   console.log();
 
   const { addChannels } = await inquirer.prompt([{
@@ -1064,10 +1367,33 @@ function buildDockerCompose(envVars: string[], memLimit?: string, rt?: RuntimeCo
   const r = rt || RUNTIMES.nanobot;
   const mem = memLimit || r.memDefault;
   const swapLimit = mem === '512m' ? '1g' : mem === '256m' ? '512m' : mem.replace(/(\d+)g/, (_, n: string) => `${Number(n) * 2}g`);
-  const dataDir = r.id === 'nanobot' ? '/app/data' : r.id === 'zeroclaw' ? '/data' : '/app/data';
 
-  return `version: "3.8"
-services:
+  if (r.id === 'nanobot') {
+    // Nanobot: gateway 모드, ~/.nanobot 볼륨, 포트 18790
+    return `services:
+  nanobot:
+    image: ${r.image}
+    container_name: nanobot
+    command: gateway
+    restart: unless-stopped
+    ports:
+      - "${r.port}:${r.port}"
+    mem_limit: ${mem}
+    memswap_limit: ${swapLimit}
+    environment:
+${envVars.map(e => `      - ${e}`).join('\n')}
+    volumes:
+      - nanobot-config:/root/.nanobot
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  nanobot-config:
+`;
+  }
+
+  const dataDir = r.id === 'zeroclaw' ? '/data' : '/app/data';
+  return `services:
   ${r.dirName}:
     image: ${r.image}
     container_name: ${r.dirName}
