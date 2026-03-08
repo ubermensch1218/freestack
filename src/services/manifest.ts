@@ -264,7 +264,7 @@ export function getManifestForAI() {
       emailOutbound: 'Resend (3K/month free) or OCI Email Delivery (3K/month free)',
       compute: 'Oracle Cloud Always Free (ARM 4 OCPU/24GB + AMD x2)',
       vpn: 'Tailscale (3 users free)',
-      ai: 'OpenClaw + Anthropic Claude or Ollama (local)',
+      ai: 'Nanobot/OpenClaw/ZeroClaw + Anthropic Claude or Ollama (local)',
       messaging: 'Slack (free) + Telegram (free)',
     },
     commands: {
@@ -272,7 +272,7 @@ export function getManifestForAI() {
       dns: 'freestack dns setup - Configure DNS + email routing',
       mail: 'freestack mail send/inbox/read - Email management',
       keys: 'freestack keys set/list/export - API key management',
-      openclaw: 'freestack openclaw deploy/status/logs - AI agent',
+      agent: 'freestack agent deploy/status/logs - AI agent (Nanobot default)',
       vpn: 'freestack vpn setup/status/ssh - Tailscale VPN',
       server: 'freestack server list/info - Oracle Cloud instances',
       status: 'freestack status - Full dashboard',

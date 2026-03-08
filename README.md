@@ -1,95 +1,95 @@
 <p align="center">
   <img src="https://img.shields.io/badge/cost-$0%2Fmonth-brightgreen?style=for-the-badge" alt="Cost: $0/month" />
-  <img src="https://img.shields.io/badge/node-%3E%3D22-blue?style=for-the-badge" alt="Node >= 22" />
-  <img src="https://img.shields.io/badge/platform-macOS-lightgrey?style=for-the-badge" alt="macOS" />
+  <img src="https://img.shields.io/badge/node-%3E%3D18-blue?style=for-the-badge" alt="Node >= 18" />
+  <img src="https://img.shields.io/npm/v/%40ubermensch1218%2Ffreestack?style=for-the-badge&color=orange" alt="npm" />
 </p>
 
 <h1 align="center">freestack</h1>
 
 <p align="center">
   <strong>Bootstrap your entire startup workspace for $0/month.</strong><br/>
-  DNS, email, server, database, VPN, AI assistant, file sharing — all from free tiers.
+  DNS, email, server, database, VPN, AI agent, file sharing, skill hub — all from free tiers.
 </p>
 
 <p align="center">
-  <a href="#quickstart">Quickstart</a> •
-  <a href="#what-you-get">What You Get</a> •
-  <a href="#commands">Commands</a> •
-  <a href="#free-tier-stack">Free Tier Stack</a> •
-  <a href="#ai-integration">AI Integration</a>
+  <a href="#quickstart">Quickstart</a> &bull;
+  <a href="#what-you-get">What You Get</a> &bull;
+  <a href="#commands">Commands</a> &bull;
+  <a href="#ai-agent">AI Agent</a> &bull;
+  <a href="#skill-hub">Skill Hub</a> &bull;
+  <a href="#architecture">Architecture</a>
 </p>
-
----
-
-> **If this saved you from paying for Google Workspace, give it a ⭐**
->
-> Seriously — star the repo. It helps other broke founders find this.
 
 ---
 
 ## What You Get
 
-One CLI command sets up a complete workspace that would normally cost $50+/user/month:
+One CLI sets up a complete workspace that normally costs $50+/user/month:
 
-| Feature | Paid Alternative | freestack (free) |
-|---------|-----------------|------------------|
-| Custom domain email | Google Workspace ($7/user/mo) | Cloudflare Email Routing + Resend |
-| DNS + CDN + DDoS | Cloudflare Pro ($20/mo) | Cloudflare Free |
-| Server (4 CPU, 24GB RAM) | AWS/GCP ($50+/mo) | Oracle Cloud Always Free |
-| Database (MySQL/Postgres) | RDS ($15+/mo) | Self-hosted on Oracle VM |
-| VPN for team | Tailscale Business ($6/user/mo) | Tailscale Personal (3 users) |
-| AI Assistant | ChatGPT Team ($25/user/mo) | OpenClaw + Ollama (self-hosted) |
-| File sharing (10GB) | Google Drive ($7/user/mo) | Cloudflare R2 |
-| Auth / SSO | Auth0 ($23/mo) | Better Auth (self-hosted) |
+| Feature | Paid Alternative | freestack ($0) |
+|---------|-----------------|----------------|
+| Custom domain email | Google Workspace $7/user/mo | Cloudflare Email Routing + Resend |
+| DNS + CDN + DDoS | Cloudflare Pro $20/mo | Cloudflare Free |
+| Server (4 CPU, 24GB RAM) | AWS/GCP $50+/mo | Oracle Cloud Always Free |
+| Database (MySQL/Postgres) | RDS $15+/mo | Self-hosted on Oracle VM |
+| VPN for team | Tailscale Business $6/user/mo | Tailscale Personal (3 users) |
+| AI Agent | ChatGPT Team $25/user/mo | Nanobot/OpenClaw + Ollama (self-hosted) |
+| File sharing (10GB) | Google Drive $7/user/mo | Cloudflare R2 |
 
 **Total: $0/month** for up to 3 team members.
+
+---
 
 ## Quickstart
 
 ```bash
-# Install
-npx freestack
+# Install from npm
+npm install -g @ubermensch1218/freestack
 
-# Or clone and link
-git clone https://github.com/nomadlab/freestack.git
-cd freestack && npm install && npm run build && npm link
+# Or use npx
+npx @ubermensch1218/freestack init
 
-# Run the wizard — installs tools, sets up services, deploys everything
+# Run the wizard
 freestack init
 ```
 
-That's it. The wizard will:
+The wizard will:
 
-1. **Check your machine** — install missing tools via `brew`
-2. **Walk you through each service** — open signup pages, accept API keys, validate them
-3. **Provision infrastructure** — create Oracle VM, install MySQL, configure DNS
-4. **Deploy your stack** — OpenClaw AI, Tailscale VPN, email routing
+1. Check your machine and install missing tools
+2. Walk through each service — open signup pages, collect API keys, validate them
+3. Provision infrastructure — Oracle VM, MySQL, DNS
+4. Deploy your stack — AI agent, VPN, email routing
+
+---
 
 ## Commands
 
-### Setup
-```bash
+### Setup & Status
+
+```
 freestack init              # Interactive setup wizard (does everything)
 freestack doctor            # Check & install local tools (brew)
 freestack doctor --install  # Auto-install all missing tools
 freestack keys set          # Manage API keys interactively
-freestack keys list         # Show stored keys
+freestack keys list         # Show stored keys (masked)
 freestack keys export       # Export as .env format
 freestack status            # Full dashboard
 ```
 
 ### DNS & Email
-```bash
-freestack dns setup         # Cloudflare DNS + Email Routing (one command)
+
+```
+freestack dns setup         # Cloudflare DNS + Email Routing
 freestack dns records       # List DNS records
-freestack dns resend-verify # Auto-add Resend DNS records to Cloudflare
+freestack dns resend-verify # Auto-add Resend DNS records
 freestack mail send         # Send email (interactive or flags)
 freestack mail inbox        # View sent emails
 freestack mail read <id>    # Read email details
 ```
 
-### Server & Database
-```bash
+### Server & Team
+
+```
 freestack server list       # Oracle Cloud instances
 freestack server info       # Free tier details
 freestack team setup        # DB setup (MySQL / PostgreSQL / Neon)
@@ -99,35 +99,174 @@ freestack team role <email> <ADMIN|GROUP|TEAM|ANON>
 ```
 
 ### Calendar & Files
-```bash
+
+```
 freestack cal add           # Add event
 freestack cal today         # Today's schedule
 freestack cal list --week   # This week's events
 freestack files setup       # Create R2 bucket
-freestack files upload <path>  # Upload to R2 CDN
+freestack files upload <p>  # Upload to R2 CDN
 freestack files list        # List files with access roles
 ```
 
-### AI Assistant (OpenClaw)
-```bash
-freestack openclaw deploy   # Deploy to Oracle VM (Docker)
-freestack openclaw status   # Check if running
-freestack openclaw logs     # View logs
-freestack openclaw update   # Pull latest version
-freestack openclaw stop     # Stop container
+### AI Agent (Nanobot / OpenClaw / ZeroClaw)
+
+```
+freestack agent deploy      # Deploy AI agent (choose runtime + target)
+freestack agent status      # Check running state
+freestack agent logs        # View container logs
+freestack agent start       # Start container
+freestack agent stop        # Stop container
+freestack agent update      # Pull latest image
+freestack agent pricing     # Cloud server price comparison
+freestack agent usecases    # Install usecase templates
+```
+
+Deploy flow:
+
+```
+? AI 에이전트 런타임 선택:
+  ❯ 🐱 Nanobot (HKUDS) — 추천  Python 4천줄, 45MB, MCP
+    🦞 OpenClaw — 280K stars, 최대 기능, 무거움
+    ⚡ ZeroClaw — Rust, 5MB, ARM/엣지 특화
+
+? 배포 대상 선택:
+  ❯ 🏠 홈서버 (Tailscale) — $0/월
+    🖥️  원격 Linux VM (SSH)
+    📋 클라우드 가격 비교
+```
+
+### Skill Hub
+
+```
+freestack hub               # Interactive category browser
+freestack hub search <q>    # Search local + ClawHub
+freestack hub browse [cat]  # Browse by category
+freestack hub info <id>     # Skill details + env var status
+freestack hub install <id>  # Interactive install (API keys → Q&A)
+freestack hub remove <id>   # Uninstall skill
+freestack hub list          # Installed skills table
+freestack hub export        # Generate master prompt
+freestack hub update [id]   # Version update
+freestack hub setup         # ONE-SHOT WIZARD: all skills in one go
 ```
 
 ### VPN (Tailscale)
-```bash
+
+```
 freestack vpn setup         # Install on local + server
 freestack vpn status        # Network status
-freestack vpn ssh           # SSH via VPN (no public port needed)
+freestack vpn ssh           # SSH via VPN
 freestack vpn expose <port> # Tailscale Funnel (public HTTPS)
 ```
 
-## Roles & Access Control
+---
 
-Built-in RBAC for team management and file access:
+## AI Agent
+
+freestack supports three self-hosted AI agent runtimes:
+
+| | Nanobot (default) | OpenClaw | ZeroClaw |
+|---|---|---|---|
+| Language | Python (~4K LOC) | TypeScript (430K LOC) | Rust (3.4MB binary) |
+| Memory | 45MB | 2-4GB | <5MB |
+| Startup | 0.8s | 8-12s | <10ms |
+| LLM Providers | 11+ (Claude, OpenAI, Gemini, Kimi, GLM, DeepSeek, Ollama...) | 11+ | 20+ |
+| Channels | Telegram, Discord, WhatsApp, Slack, Email, QQ | Same | Same |
+| MCP Support | Yes (v0.1.4+) | Yes | No |
+| Install | `pip install nanobot-ai` or Docker | Docker | Binary |
+
+**Why Nanobot is default**: Smallest footprint, auditable code, MCP support, no security CVEs, runs on 1GB VPS.
+
+### Multi-LLM Support
+
+During deploy, freestack collects API keys for multiple providers:
+
+```
+Claude (Anthropic) — primary
+OpenAI             — fallback
+Google Gemini      — fallback
+Kimi (Moonshot)    — cheap alternative
+GLM (Zhipu)        — cheap alternative
+Ollama             — local GPU, $0
+```
+
+All keys are injected into the Docker container. The runtime uses them for fallback chains and cost-optimized routing.
+
+### Post-Deploy Verification
+
+After deploy, freestack runs a test against every registered key:
+
+```
+테스트 run — 등록된 키 검증
+
+✓ Claude — 작동 확인!
+✓ OpenAI — 작동 확인!
+✗ Gemini — HTTP 403
+✓ Telegram — @mybot 작동 확인!
+
+검증 결과: 3/4 서비스 작동 확인!
+? 더 넣을 키가 있을까요? (Y/n)
+```
+
+---
+
+## Skill Hub
+
+11 curated skills across 7 categories, plus ClawHub integration (5400+ community skills):
+
+| Category | Skills |
+|----------|--------|
+| Finance | stock-watcher, stock-technical-analysis, naverstock |
+| Social | yarn-threads-cli, social-scheduler |
+| Content | naver-blog-writer |
+| Communication | kakaotalk |
+| Research | reddit-readonly, naver-search, naver-shopping |
+| Development | claude-team |
+
+Each skill installs with interactive Q&A that fills `{{PLACEHOLDER}}` patterns in the prompt template.
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────┐
+│                   Internet                    │
+└───────────────────┬──────────────────────────┘
+                    │
+┌───────────────────▼──────────────────────────┐
+│           Cloudflare (FREE)                   │
+│   DNS · CDN · Email Routing · R2 · Pages      │
+└───────────────────┬──────────────────────────┘
+                    │
+┌───────────────────▼──────────────────────────┐
+│       Oracle Cloud ARM VM (FREE)              │
+│   4 OCPU · 24GB RAM · 200GB Storage           │
+│                                               │
+│   ┌──────────┐  ┌──────────┐  ┌──────────┐   │
+│   │  MySQL   │  │ Nanobot  │  │Tailscale │   │
+│   │  (DB)    │  │(AI Agent)│  │  (VPN)   │   │
+│   └──────────┘  └──────────┘  └──────────┘   │
+└───────────────────┬──────────────────────────┘
+                    │ Tailscale Mesh VPN
+          ┌─────────┼─────────┐
+          │         │         │
+       Laptop    Phone    Home Server
+                             (GPU + Ollama)
+```
+
+### Free Tier Limits
+
+| Service | Free Allocation |
+|---------|----------------|
+| **Cloudflare** | DNS, CDN, Email Routing, Pages, R2 (10GB), Workers |
+| **Resend** | 3,000 emails/month |
+| **Oracle Cloud** | ARM 4C/24GB + AMD x2 + 200GB + 10TB bandwidth |
+| **Tailscale** | 3 users, 100 devices |
+| **Neon** | 0.5GB serverless Postgres |
+
+### Roles & Access Control
 
 | Role | Level | Access |
 |------|-------|--------|
@@ -136,75 +275,31 @@ Built-in RBAC for team management and file access:
 | `GROUP` | 2 | Group-scoped management |
 | `ADMIN` | 3 | Full access, user management |
 
-## Free Tier Stack
+---
 
-```
-┌─────────────────────────────────────────────┐
-│                  Internet                    │
-└──────────────────┬──────────────────────────┘
-                   │
-┌──────────────────▼──────────────────────────┐
-│          Cloudflare (FREE)                   │
-│  DNS · CDN · Email Routing · R2 · Pages      │
-└──────────────────┬──────────────────────────┘
-                   │
-┌──────────────────▼──────────────────────────┐
-│      Oracle Cloud ARM VM (FREE)              │
-│  4 OCPU · 24GB RAM · 200GB Storage           │
-│                                              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐     │
-│  │  MySQL   │ │ OpenClaw │ │Tailscale │     │
-│  │  (DB)    │ │ (AI Bot) │ │  (VPN)   │     │
-│  └──────────┘ └──────────┘ └──────────┘     │
-└──────────────────┬──────────────────────────┘
-                   │ Tailscale Mesh VPN
-         ┌─────────┼─────────┐
-         │         │         │
-      Laptop     Phone    Other VMs
-```
+## AI-Readable Manifest
 
-### Service Limits
-
-| Service | Free Allocation |
-|---------|----------------|
-| **Cloudflare** | DNS, CDN, Email Routing, Pages, R2 (10GB), Workers |
-| **Resend** | 3,000 emails/month |
-| **Oracle Cloud** | ARM 4C/24GB + AMD×2 + 200GB + 10TB bandwidth |
-| **OCI Email** | 3,000 emails/month |
-| **OCI DB** | 2× Autonomous DB (1 OCPU + 20GB each) |
-| **Tailscale** | 3 users, 100 devices |
-| **Neon** | 0.5GB serverless Postgres |
-
-## AI Integration
-
-freestack is designed to be operated by AI agents:
+freestack is designed for AI agents to operate:
 
 ```bash
-# Output structured JSON manifest for AI consumption
-freestack init --manifest
-
-# AI agent can read this and automate the entire setup flow
+freestack init --manifest   # Output structured JSON for AI consumption
 ```
 
-The manifest includes signup URLs, key formats, validation endpoints, and setup instructions — everything an AI needs to bootstrap your workspace autonomously.
+The manifest includes: signup URLs, key formats, validation endpoints, setup instructions, and the complete command reference. An AI agent can read it and bootstrap the entire workspace autonomously.
 
-## Database Options
-
-```
-? DB engine:
-  ❯ MySQL       — Install on Oracle VM (fast, simple)
-    PostgreSQL  — Install on Oracle VM
-    Neon        — Serverless Postgres (neon.tech, 0.5GB free)
-```
-
-freestack auto-installs your chosen DB on the Oracle VM and creates the schema.
+---
 
 ## Requirements
 
-- **macOS** (Linux support planned)
-- **Node.js** ≥ 22
-- **Homebrew** (for tool installation)
-- A domain name (buy one or use a free one)
+- **Node.js** >= 18
+- **macOS** or **Linux** (Windows via WSL)
+- A domain name (optional but recommended)
+
+## Install
+
+```bash
+npm install -g @ubermensch1218/freestack
+```
 
 ## Philosophy
 

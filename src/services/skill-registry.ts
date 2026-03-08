@@ -177,7 +177,7 @@ export function exportMasterPrompt(): string {
 
   return `# Freestack 스킬 통합 프롬프트
 
-아래 프롬프트를 OpenClaw/NanoClaw에 붙여넣어서 모든 스킬을 한번에 설정하세요.
+아래 프롬프트를 AI 에이전트(Nanobot/OpenClaw)에 붙여넣어서 모든 스킬을 한번에 설정하세요.
 
 ---
 

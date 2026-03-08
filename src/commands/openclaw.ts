@@ -7,8 +7,11 @@ import { config } from '../services/config.js';
 import { getEnvVarsForDeploy } from './keys.js';
 import * as ui from '../utils/ui.js';
 
-export const openclawCommand = new Command('openclaw')
-  .description('OpenClaw AI 비서 배포 및 관리');
+export const agentCommand = new Command('agent')
+  .description('AI 에이전트 배포 및 관리 (Nanobot / OpenClaw / ZeroClaw)');
+
+// 하위호환: openclaw → agent alias
+export const openclawCommand = agentCommand;
 
 function sshExec(ip: string, cmd: string, keyPath?: string, user = 'ubuntu'): string {
   const keyFlag = keyPath ? `-i ${keyPath}` : '';
@@ -18,10 +21,86 @@ function sshExec(ip: string, cmd: string, keyPath?: string, user = 'ubuntu'): st
   );
 }
 
+// ─── Runtime definitions ───
+
+type AgentRuntime = 'nanobot' | 'openclaw' | 'zeroclaw';
+
+interface RuntimeConfig {
+  id: AgentRuntime;
+  name: string;
+  image: string;
+  port: number;
+  dirName: string;
+  lang: string;
+  installCmd?: string;       // pip install 등 non-docker 설치
+  envPrefix: string;         // 환경변수 프리픽스 (LLM_PROVIDERS 등)
+  memDefault: string;
+  description: string;
+}
+
+const RUNTIMES: Record<AgentRuntime, RuntimeConfig> = {
+  nanobot: {
+    id: 'nanobot',
+    name: 'Nanobot (HKUDS)',
+    image: 'ghcr.io/hkuds/nanobot:latest',
+    port: 3210,
+    dirName: 'nanobot',
+    lang: 'Python',
+    installCmd: 'pip install nanobot-ai',
+    envPrefix: 'NANOBOT',
+    memDefault: '512m',
+    description: '4천줄 Python, 45MB 메모리, MCP 지원, 감사 가능한 코드',
+  },
+  openclaw: {
+    id: 'openclaw',
+    name: 'OpenClaw',
+    image: 'ghcr.io/openclaw/openclaw:latest',
+    port: 3777,
+    dirName: 'openclaw',
+    lang: 'TypeScript',
+    envPrefix: 'OPENCLAW',
+    memDefault: '2g',
+    description: '280K stars, 최대 기능, 5400+ 스킬, 무겁고 CVE 주의',
+  },
+  zeroclaw: {
+    id: 'zeroclaw',
+    name: 'ZeroClaw',
+    image: 'ghcr.io/zeroclaw/zeroclaw:latest',
+    port: 3800,
+    dirName: 'zeroclaw',
+    lang: 'Rust',
+    envPrefix: 'ZEROCLAW',
+    memDefault: '256m',
+    description: '3.4MB 바이너리, <5MB 메모리, ARM/IoT/엣지 특화',
+  },
+};
+
+const DEFAULT_RUNTIME: AgentRuntime = 'nanobot';
+
+async function selectRuntime(): Promise<RuntimeConfig> {
+  const saved = (config.get('openclaw') as any)?.runtime as AgentRuntime | undefined;
+  const defaultVal = saved || DEFAULT_RUNTIME;
+
+  const { runtime } = await inquirer.prompt([{
+    type: 'list',
+    name: 'runtime',
+    message: 'AI 에이전트 런타임 선택:',
+    choices: [
+      { name: `🐱 Nanobot (HKUDS) — ${chalk.green('추천')} Python 4천줄, 45MB, MCP`, value: 'nanobot' },
+      { name: `🦞 OpenClaw — 280K stars, 최대 기능, 무거움 (CVE 주의)`, value: 'openclaw' },
+      { name: `⚡ ZeroClaw — Rust, 5MB, ARM/엣지 특화`, value: 'zeroclaw' },
+    ],
+    default: defaultVal,
+  }]);
+
+  return RUNTIMES[runtime as AgentRuntime];
+}
+
 // ─── Deploy target configs ───
 
 interface DeployTarget {
   type: 'homeserver' | 'remote-linux' | 'info';
+  runtime: AgentRuntime;
   ip?: string;
   sshKeyPath?: string;
   sshUser?: string;
@@ -44,13 +123,20 @@ const CLOUD_OPTIONS = [
 
 // ─── Deploy command ───
 
-openclawCommand
+agentCommand
   .command('deploy')
-  .description('OpenClaw + Ollama 배포 (홈서버 / 클라우드)')
+  .description('AI 에이전트 배포 (Nanobot/OpenClaw/ZeroClaw)')
   .action(async () => {
     console.log();
-    ui.heading('OpenClaw 배포');
+    ui.heading('AI 에이전트 배포');
 
+    // 1) 런타임 선택
+    const rt = await selectRuntime();
+    console.log();
+    ui.success(`런타임: ${rt.name} (${rt.lang}, ${rt.description})`);
+    console.log();
+
+    // 2) 배포 대상 선택
     const { target } = await inquirer.prompt([{
       type: 'list',
       name: 'target',
@@ -68,16 +154,16 @@ openclawCommand
     }
 
     if (target === 'homeserver') {
-      await deployHomeServer();
+      await deployHomeServer(rt);
     } else {
-      await deployRemoteLinux();
+      await deployRemoteLinux(rt);
     }
   });
 
 // ─── Home server deploy (Tailscale + Docker Desktop) ───
 
-async function deployHomeServer() {
-  ui.heading('홈서버 배포 (Tailscale 경유)');
+async function deployHomeServer(rt: RuntimeConfig) {
+  ui.heading(`${rt.name} — 홈서버 배포 (Tailscale 경유)`);
   console.log();
   ui.info('홈서버 요구사항:');
   ui.info('  • Tailscale 설치 + 로그인');
@@ -154,6 +240,7 @@ async function deployHomeServer() {
   config.set('openclaw' as any, {
     ...ocConfig,
     type: 'homeserver',
+    runtime: rt.id,
     tailscaleIp: answers.tailscaleIp,
     sshUser: answers.sshUser,
     serverIp: answers.tailscaleIp,
@@ -177,7 +264,7 @@ async function deployHomeServer() {
     ui.info('  tailscale up --ssh    (홈서버에서 실행)');
     ui.info('  또는 홈서버에서 직접 아래 명령어를 실행하세요:');
     console.log();
-    printHomeServerManual(answers, apiKey);
+    printHomeServerManual(answers, apiKey, rt);
     return;
   }
 
@@ -193,32 +280,32 @@ async function deployHomeServer() {
       ui.info('설치 후 WSL2 백엔드 활성화 필요');
     }
     console.log();
-    printHomeServerManual(answers, apiKey);
+    printHomeServerManual(answers, apiKey, rt);
     return;
   }
 
-  // Deploy OpenClaw via docker-compose
-  const clawSpinner = ora('OpenClaw 배포 중...').start();
+  // Deploy via docker-compose
+  const clawSpinner = ora(`${rt.name} 배포 중...`).start();
   try {
-    const envVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel);
-    const compose = buildDockerCompose(envVars, '4g');
+    const envVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel, rt);
+    const compose = buildDockerCompose(envVars, '4g', rt);
 
     sshExec(answers.tailscaleIp,
-      `mkdir -p ~/openclaw && cat > ~/openclaw/docker-compose.yml << 'COMPOSEEOF'\n${compose}\nCOMPOSEEOF`,
+      `mkdir -p ~/${rt.dirName} && cat > ~/${rt.dirName}/docker-compose.yml << 'COMPOSEEOF'\n${compose}\nCOMPOSEEOF`,
       undefined, answers.sshUser);
-    sshExec(answers.tailscaleIp, 'cd ~/openclaw && docker compose pull && docker compose up -d',
+    sshExec(answers.tailscaleIp, `cd ~/${rt.dirName} && docker compose pull && docker compose up -d`,
       undefined, answers.sshUser);
-    clawSpinner.succeed('OpenClaw 배포 완료!');
+    clawSpinner.succeed(`${rt.name} 배포 완료!`);
   } catch (e: any) {
     clawSpinner.fail(`배포 실패: ${e.message}`);
     console.log();
-    printHomeServerManual(answers, apiKey);
+    printHomeServerManual(answers, apiKey, rt);
     return;
   }
 
   // Result
   console.log();
-  ui.heading('✅ 홈서버 배포 완료!');
+  ui.heading(`✅ ${rt.name} 홈서버 배포 완료!`);
 
   const deployedKeys = getAllKeys();
   const activeLLMs = EXTRA_LLM_PROVIDERS.filter(p => deployedKeys[p.id]).map(p => p.name);
@@ -227,12 +314,13 @@ async function deployHomeServer() {
   const activeChannels = CHANNEL_TOKENS.filter(c => deployedKeys[c.id]).map(c => c.name.split(' ')[0]);
 
   ui.keyValue({
-    'OpenClaw': `http://${answers.tailscaleIp}:3777`,
+    '런타임': rt.name,
+    'URL': `http://${answers.tailscaleIp}:${rt.port}`,
     'LLM': activeLLMs.join(', ') || answers.provider,
     'Ollama Model': answers.provider !== 'anthropic' ? (answers.ollamaModel || 'llama3.2') : '-',
-    '채널': activeChannels.length ? activeChannels.join(', ') : chalk.dim('미설정 (freestack openclaw deploy 재실행)'),
+    '채널': activeChannels.length ? activeChannels.join(', ') : chalk.dim('미설정 (freestack agent deploy 재실행)'),
     '서버': `${answers.tailscaleIp} (Tailscale)`,
-    'RAM': '64GB → OpenClaw 4GB 제한, 여유 충분',
+    '메모리': rt.id === 'nanobot' ? '~45MB (가벼움)' : rt.id === 'zeroclaw' ? '<5MB (초경량)' : '2-4GB',
   });
 
   if (answers.provider !== 'anthropic') {
@@ -240,7 +328,7 @@ async function deployHomeServer() {
     ui.heading('Ollama 설정 (홈서버에서 직접)');
     ui.info(`1. Ollama 설치: ${chalk.cyan('https://ollama.com/download')}`);
     ui.info(`2. 모델 다운로드: ${chalk.cyan(`ollama pull ${answers.ollamaModel || 'llama3.2'}`)}`);
-    ui.info(`3. Ollama가 실행되면 OpenClaw이 자동으로 연결합니다.`);
+    ui.info(`3. Ollama가 실행되면 에이전트가 자동으로 연결합니다.`);
     ui.info(`   GPU 24GB → ${chalk.green('70B 양자화 모델까지 가능')}`);
   }
 
@@ -250,28 +338,28 @@ async function deployHomeServer() {
     // 키가 추가됐으면 docker-compose 재생성 & 재배포
     const redeploySpinner = ora('새 키로 재배포 중...').start();
     try {
-      const newEnvVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel);
-      const newCompose = buildDockerCompose(newEnvVars, '4g');
+      const newEnvVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel, rt);
+      const newCompose = buildDockerCompose(newEnvVars, '4g', rt);
       sshExec(answers.tailscaleIp,
-        `cat > ~/openclaw/docker-compose.yml << 'COMPOSEEOF'\n${newCompose}\nCOMPOSEEOF`,
+        `cat > ~/${rt.dirName}/docker-compose.yml << 'COMPOSEEOF'\n${newCompose}\nCOMPOSEEOF`,
         undefined, answers.sshUser);
-      sshExec(answers.tailscaleIp, 'cd ~/openclaw && docker compose up -d',
+      sshExec(answers.tailscaleIp, `cd ~/${rt.dirName} && docker compose up -d`,
         undefined, answers.sshUser);
       redeploySpinner.succeed('새 키 반영 완료!');
     } catch (e: any) {
-      redeploySpinner.warn(`재배포 실패: ${e.message} — freestack openclaw update 로 재시도`);
+      redeploySpinner.warn(`재배포 실패: ${e.message} — freestack agent update 로 재시도`);
     }
   }
 }
 
-function printHomeServerManual(answers: any, apiKey: string) {
-  const envVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel);
-  const compose = buildDockerCompose(envVars, '4g');
+function printHomeServerManual(answers: any, apiKey: string, rt: RuntimeConfig) {
+  const envVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel, rt);
+  const compose = buildDockerCompose(envVars, '4g', rt);
 
-  ui.heading('수동 설치 가이드');
+  ui.heading(`${rt.name} 수동 설치 가이드`);
   console.log(chalk.dim('홈서버에서 아래 명령어를 실행하세요:\n'));
   console.log(chalk.cyan('# 1. 디렉토리 생성'));
-  console.log('mkdir -p ~/openclaw && cd ~/openclaw\n');
+  console.log(`mkdir -p ~/${rt.dirName} && cd ~/${rt.dirName}\n`);
   console.log(chalk.cyan('# 2. docker-compose.yml 생성'));
   console.log(`cat > docker-compose.yml << 'EOF'`);
   console.log(compose);
@@ -292,8 +380,8 @@ function printHomeServerManual(answers: any, apiKey: string) {
 
 // ─── Remote Linux VM deploy (existing logic) ───
 
-async function deployRemoteLinux() {
-  ui.heading('원격 Linux VM 배포 (SSH)');
+async function deployRemoteLinux(rt: RuntimeConfig) {
+  ui.heading(`${rt.name} — 원격 Linux VM 배포 (SSH)`);
   console.log();
 
   const ocConfig = config.get('openclaw') as any;
@@ -365,6 +453,7 @@ async function deployRemoteLinux() {
   config.set('openclaw' as any, {
     ...ocConfig,
     type: 'remote-linux',
+    runtime: rt.id,
     serverIp: answers.ip,
     sshKeyPath: answers.key,
     sshUser: answers.sshUser,
@@ -416,17 +505,17 @@ async function deployRemoteLinux() {
   }
 
   // Deploy
-  const clawSpinner = ora('OpenClaw 배포 중...').start();
+  const clawSpinner = ora(`${rt.name} 배포 중...`).start();
   try {
-    const envVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel);
-    const compose = buildDockerCompose(envVars, answers.memLimit);
+    const envVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel, rt);
+    const compose = buildDockerCompose(envVars, answers.memLimit, rt);
 
     sshExec(answers.ip,
-      `mkdir -p ~/openclaw && cat > ~/openclaw/docker-compose.yml << 'COMPOSEEOF'\n${compose}\nCOMPOSEEOF`,
+      `mkdir -p ~/${rt.dirName} && cat > ~/${rt.dirName}/docker-compose.yml << 'COMPOSEEOF'\n${compose}\nCOMPOSEEOF`,
       answers.key, answers.sshUser);
-    sshExec(answers.ip, 'cd ~/openclaw && docker compose pull && docker compose up -d',
+    sshExec(answers.ip, `cd ~/${rt.dirName} && docker compose pull && docker compose up -d`,
       answers.key, answers.sshUser);
-    clawSpinner.succeed('OpenClaw 배포 완료!');
+    clawSpinner.succeed(`${rt.name} 배포 완료!`);
   } catch (e: any) {
     clawSpinner.fail(`배포 실패: ${e.message}`);
     return;
@@ -434,11 +523,11 @@ async function deployRemoteLinux() {
 
   // Firewall
   try {
-    sshExec(answers.ip, 'sudo iptables -I INPUT -p tcp --dport 3777 -j ACCEPT', answers.key, answers.sshUser);
+    sshExec(answers.ip, `sudo iptables -I INPUT -p tcp --dport ${rt.port} -j ACCEPT`, answers.key, answers.sshUser);
   } catch {}
 
   console.log();
-  ui.heading('배포 완료!');
+  ui.heading(`${rt.name} 배포 완료!`);
 
   const deployedKeys = getAllKeys();
   const activeLLMs = EXTRA_LLM_PROVIDERS.filter(p => deployedKeys[p.id]).map(p => p.name);
@@ -447,7 +536,8 @@ async function deployRemoteLinux() {
   const activeChannels = CHANNEL_TOKENS.filter(c => deployedKeys[c.id]).map(c => c.name.split(' ')[0]);
 
   ui.keyValue({
-    'OpenClaw': `http://${answers.ip}:3777`,
+    '런타임': rt.name,
+    'URL': `http://${answers.ip}:${rt.port}`,
     'LLM': activeLLMs.join(', ') || answers.provider,
     'Memory': answers.memLimit,
     '채널': activeChannels.length ? activeChannels.join(', ') : chalk.dim('미설정'),
@@ -460,12 +550,12 @@ async function deployRemoteLinux() {
   if (keysChanged) {
     const redeploySpinner = ora('새 키로 재배포 중...').start();
     try {
-      const newEnvVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel);
-      const newCompose = buildDockerCompose(newEnvVars, answers.memLimit);
+      const newEnvVars = buildEnvVars(answers.provider, apiKey, answers.ollamaModel, rt);
+      const newCompose = buildDockerCompose(newEnvVars, answers.memLimit, rt);
       sshExec(answers.ip,
-        `cat > ~/openclaw/docker-compose.yml << 'COMPOSEEOF'\n${newCompose}\nCOMPOSEEOF`,
+        `cat > ~/${rt.dirName}/docker-compose.yml << 'COMPOSEEOF'\n${newCompose}\nCOMPOSEEOF`,
         answers.key, answers.sshUser);
-      sshExec(answers.ip, 'cd ~/openclaw && docker compose up -d',
+      sshExec(answers.ip, `cd ~/${rt.dirName} && docker compose up -d`,
         answers.key, answers.sshUser);
       redeploySpinner.succeed('새 키 반영 완료!');
     } catch (e: any) {
@@ -477,7 +567,7 @@ async function deployRemoteLinux() {
 // ─── Cloud pricing info ───
 
 function showCloudPricing() {
-  ui.heading('OpenClaw 서버 가격 비교 (4GB RAM 기준)');
+  ui.heading('AI 에이전트 서버 가격 비교');
   console.log();
   ui.table(
     ['서비스', '사양', '월 비용', '비고'],
@@ -497,10 +587,11 @@ function showCloudPricing() {
 
 // ─── Shared helpers ───
 
-function buildEnvVars(provider: string, apiKey: string, ollamaModel?: string): string[] {
+function buildEnvVars(provider: string, apiKey: string, ollamaModel?: string, rt?: RuntimeConfig): string[] {
   const storedEnv = getEnvVarsForDeploy();
+  const prefix = rt?.envPrefix || 'OPENCLAW';
   const envVars: string[] = [
-    `OPENCLAW_AI_PROVIDER=${provider === 'both' ? 'anthropic' : provider}`,
+    `${prefix}_AI_PROVIDER=${provider === 'both' ? 'anthropic' : provider}`,
   ];
 
   // 메인 프로바이더 키
@@ -511,14 +602,13 @@ function buildEnvVars(provider: string, apiKey: string, ollamaModel?: string): s
   }
 
   // 저장된 모든 키 주입 (LLM, 채널, 서비스 전부)
-  // getEnvVarsForDeploy()가 keys.ts의 KEY_DEFS 전체를 환경변수로 변환
   for (const [k, v] of Object.entries(storedEnv)) {
     if (!envVars.some(e => e.startsWith(`${k}=`))) {
       envVars.push(`${k}=${v}`);
     }
   }
 
-  // 사용 가능한 LLM 프로바이더 목록 (OpenClaw가 폴백 체인으로 활용)
+  // 사용 가능한 LLM 프로바이더 목록 (런타임이 폴백 체인으로 활용)
   const llmProviders: string[] = [];
   if (storedEnv['ANTHROPIC_API_KEY'] || apiKey) llmProviders.push('anthropic');
   if (storedEnv['OPENAI_API_KEY']) llmProviders.push('openai');
@@ -528,7 +618,7 @@ function buildEnvVars(provider: string, apiKey: string, ollamaModel?: string): s
   if (provider === 'ollama' || provider === 'both') llmProviders.push('ollama');
 
   if (llmProviders.length > 0) {
-    envVars.push(`OPENCLAW_LLM_PROVIDERS=${llmProviders.join(',')}`);
+    envVars.push(`${prefix}_LLM_PROVIDERS=${llmProviders.join(',')}`);
   }
 
   return envVars;
@@ -970,26 +1060,31 @@ async function verifyAllKeys(): Promise<boolean> {
   return false; // 변경 없음
 }
 
-function buildDockerCompose(envVars: string[], memLimit = '2g'): string {
+function buildDockerCompose(envVars: string[], memLimit?: string, rt?: RuntimeConfig): string {
+  const r = rt || RUNTIMES.nanobot;
+  const mem = memLimit || r.memDefault;
+  const swapLimit = mem === '512m' ? '1g' : mem === '256m' ? '512m' : mem.replace(/(\d+)g/, (_, n: string) => `${Number(n) * 2}g`);
+  const dataDir = r.id === 'nanobot' ? '/app/data' : r.id === 'zeroclaw' ? '/data' : '/app/data';
+
   return `version: "3.8"
 services:
-  openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
-    container_name: openclaw
+  ${r.dirName}:
+    image: ${r.image}
+    container_name: ${r.dirName}
     restart: unless-stopped
     ports:
-      - "3777:3777"
-    mem_limit: ${memLimit}
-    memswap_limit: ${memLimit === '512m' ? '1g' : memLimit.replace(/(\d+)g/, (_, n) => `${Number(n) * 2}g`)}
+      - "${r.port}:${r.port}"
+    mem_limit: ${mem}
+    memswap_limit: ${swapLimit}
     environment:
 ${envVars.map(e => `      - ${e}`).join('\n')}
     volumes:
-      - openclaw-data:/app/data
+      - ${r.dirName}-data:${dataDir}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
 volumes:
-  openclaw-data:
+  ${r.dirName}-data:
 `;
 }
 
@@ -998,10 +1093,16 @@ volumes:
 function getServerConfig() {
   const ocConfig = config.get('openclaw') as any;
   if (!ocConfig?.serverIp) {
-    ui.error('OpenClaw이 설정되지 않았습니다. freestack openclaw deploy 먼저.');
+    ui.error('에이전트가 설정되지 않았습니다. freestack agent deploy 먼저.');
     return null;
   }
   return ocConfig;
+}
+
+function getSavedRuntime(): RuntimeConfig {
+  const ocConfig = config.get('openclaw') as any;
+  const rtId = (ocConfig?.runtime || DEFAULT_RUNTIME) as AgentRuntime;
+  return RUNTIMES[rtId] || RUNTIMES.nanobot;
 }
 
 function execOnServer(ocConfig: any, cmd: string): string {
@@ -1012,96 +1113,102 @@ function execOnServer(ocConfig: any, cmd: string): string {
   return sshExec(ocConfig.serverIp, cmd, ocConfig.sshKeyPath, user);
 }
 
-openclawCommand
+agentCommand
   .command('status')
-  .description('OpenClaw 실행 상태 확인')
+  .description('에이전트 실행 상태 확인')
   .action(async () => {
     const oc = getServerConfig();
     if (!oc) return;
+    const rt = getSavedRuntime();
 
     const spinner = ora('상태 확인 중...').start();
     try {
-      const status = execOnServer(oc, 'docker ps --filter name=openclaw --format "{{.Status}}"');
-      const stats = execOnServer(oc, 'docker stats openclaw --no-stream --format "CPU: {{.CPUPerc}}, MEM: {{.MemUsage}}"').trim();
+      const status = execOnServer(oc, `docker ps --filter name=${rt.dirName} --format "{{.Status}}"`);
+      const stats = execOnServer(oc, `docker stats ${rt.dirName} --no-stream --format "CPU: {{.CPUPerc}}, MEM: {{.MemUsage}}"`).trim();
       spinner.stop();
 
       if (status.trim()) {
-        ui.success(`OpenClaw: ${chalk.green(status.trim())}`);
+        ui.success(`${rt.name}: ${chalk.green(status.trim())}`);
         console.log(`  ${stats}`);
         ui.keyValue({
-          'URL': `http://${oc.tailscaleIp || oc.serverIp}:3777`,
+          '런타임': rt.name,
+          'URL': `http://${oc.tailscaleIp || oc.serverIp}:${rt.port}`,
           'Provider': oc.provider || '-',
           'Type': oc.type === 'homeserver' ? '🏠 홈서버' : '🖥️  원격 VM',
         });
       } else {
-        ui.warn('OpenClaw이 실행중이 아닙니다.');
-        ui.info('시작: freestack openclaw start');
+        ui.warn(`${rt.name}이 실행중이 아닙니다.`);
+        ui.info('시작: freestack agent start');
       }
     } catch (e: any) {
       spinner.fail(e.message);
     }
   });
 
-openclawCommand
+agentCommand
   .command('logs')
-  .description('OpenClaw 로그 보기')
+  .description('에이전트 로그 보기')
   .option('-n, --lines <n>', '줄 수', '50')
   .action(async (opts) => {
     const oc = getServerConfig();
     if (!oc) return;
+    const rt = getSavedRuntime();
     try {
-      console.log(execOnServer(oc, `docker logs openclaw --tail ${opts.lines}`));
+      console.log(execOnServer(oc, `docker logs ${rt.dirName} --tail ${opts.lines}`));
     } catch (e: any) {
       ui.error(e.message);
     }
   });
 
-openclawCommand
+agentCommand
   .command('start')
-  .description('OpenClaw 시작')
+  .description('에이전트 시작')
   .action(async () => {
     const oc = getServerConfig();
     if (!oc) return;
-    const spinner = ora('OpenClaw 시작 중...').start();
+    const rt = getSavedRuntime();
+    const spinner = ora(`${rt.name} 시작 중...`).start();
     try {
-      execOnServer(oc, 'cd ~/openclaw && docker compose up -d');
-      spinner.succeed('OpenClaw 시작됨');
+      execOnServer(oc, `cd ~/${rt.dirName} && docker compose up -d`);
+      spinner.succeed(`${rt.name} 시작됨`);
     } catch (e: any) {
       spinner.fail(e.message);
     }
   });
 
-openclawCommand
+agentCommand
   .command('stop')
-  .description('OpenClaw 중지')
+  .description('에이전트 중지')
   .action(async () => {
     const oc = getServerConfig();
     if (!oc) return;
-    const spinner = ora('OpenClaw 중지 중...').start();
+    const rt = getSavedRuntime();
+    const spinner = ora(`${rt.name} 중지 중...`).start();
     try {
-      execOnServer(oc, 'cd ~/openclaw && docker compose down');
-      spinner.succeed('OpenClaw 중지됨');
+      execOnServer(oc, `cd ~/${rt.dirName} && docker compose down`);
+      spinner.succeed(`${rt.name} 중지됨`);
     } catch (e: any) {
       spinner.fail(e.message);
     }
   });
 
-openclawCommand
+agentCommand
   .command('update')
-  .description('OpenClaw 최신 버전으로 업데이트')
+  .description('에이전트 최신 버전으로 업데이트')
   .action(async () => {
     const oc = getServerConfig();
     if (!oc) return;
-    const spinner = ora('업데이트 중...').start();
+    const rt = getSavedRuntime();
+    const spinner = ora(`${rt.name} 업데이트 중...`).start();
     try {
-      execOnServer(oc, 'cd ~/openclaw && docker compose pull && docker compose up -d');
-      spinner.succeed('OpenClaw 업데이트 완료');
+      execOnServer(oc, `cd ~/${rt.dirName} && docker compose pull && docker compose up -d`);
+      spinner.succeed(`${rt.name} 업데이트 완료`);
     } catch (e: any) {
       spinner.fail(e.message);
     }
   });
 
-openclawCommand
+agentCommand
   .command('pricing')
   .description('클라우드 서버 가격 비교')
   .action(() => showCloudPricing());
@@ -1113,7 +1220,7 @@ import { getAllKeys } from './keys.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
-openclawCommand
+agentCommand
   .command('usecases')
   .description('유즈케이스 템플릿 설치 (멀티셀렉트)')
   .option('-l, --list', '목록만 보기')
@@ -1528,5 +1635,5 @@ function showUsecaseList() {
     }
   }
 
-  ui.info(`설치: ${chalk.cyan('freestack openclaw usecases')}`);
+  ui.info(`설치: ${chalk.cyan('freestack agent usecases')}`);
 }
