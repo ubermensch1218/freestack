@@ -4,7 +4,7 @@ import { config } from './config.js';
 // User picks during `freestack team setup`
 
 export type Role = 'ANON' | 'TEAM' | 'GROUP' | 'ADMIN';
-export type DbType = 'mysql' | 'postgres' | 'neon';
+export type DbType = 'mysql' | 'postgres' | 'neon' | 'd1';
 
 export interface DbConfig {
   type: DbType;
@@ -15,6 +15,10 @@ export interface DbConfig {
   database: string;
   ssl?: boolean;       // true for Neon
   connectionString?: string; // for Neon
+  // D1 fields
+  d1AccountId?: string;    // Cloudflare Account ID
+  d1ApiToken?: string;     // Cloudflare API Token
+  d1DatabaseId?: string;   // D1 Database UUID
 }
 
 // ─── Unified query interface ───
@@ -28,7 +32,36 @@ async function getQuery() {
   const db = config.get('db') as any as DbConfig;
   if (!db?.type) throw new Error('DB not configured. Run: freestack team setup');
 
-  if (db.type === 'mysql') {
+  if (db.type === 'd1') {
+    // Cloudflare D1 via REST API
+    const accountId = db.d1AccountId;
+    const apiToken = db.d1ApiToken;
+    const databaseId = db.d1DatabaseId;
+    if (!accountId || !apiToken || !databaseId) {
+      throw new Error('D1 설정 불완전. Run: freestack team setup');
+    }
+    const d1Url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`;
+
+    _query = async (sql, params) => {
+      const body: any = { sql };
+      if (params?.length) body.params = params;
+      const res = await fetch(d1Url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json() as any;
+      if (!json.success) {
+        const errMsg = json.errors?.[0]?.message || JSON.stringify(json.errors);
+        throw new Error(`D1 error: ${errMsg}`);
+      }
+      return json.result?.[0]?.results || [];
+    };
+    _cleanup = async () => {}; // stateless
+  } else if (db.type === 'mysql') {
     const mysql = await import('mysql2/promise');
     const pool = mysql.createPool({
       host: db.host,
@@ -85,24 +118,30 @@ export async function closePool() {
 export async function initSchema() {
   const db = config.get('db') as any as DbConfig;
   const isMySQL = db.type === 'mysql';
+  const isD1 = db.type === 'd1';
 
-  const autoInc = isMySQL ? 'INT AUTO_INCREMENT' : 'SERIAL';
-  const timestamp = isMySQL ? 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' : 'TIMESTAMPTZ DEFAULT NOW()';
+  const autoInc = isD1 ? 'INTEGER PRIMARY KEY AUTOINCREMENT'
+    : isMySQL ? 'INT AUTO_INCREMENT' : 'SERIAL';
+  const pkSuffix = isD1 ? '' : ' PRIMARY KEY';
+  const timestamp = isD1 ? "TEXT DEFAULT (datetime('now'))"
+    : isMySQL ? 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' : 'TIMESTAMPTZ DEFAULT NOW()';
   const onUpdate = isMySQL ? 'ON UPDATE CURRENT_TIMESTAMP' : '';
-  const enumRole = isMySQL
-    ? "ENUM('ANON','TEAM','GROUP','ADMIN')"
+  const enumRole = isD1 ? "TEXT CHECK (role IN ('ANON','TEAM','GROUP','ADMIN'))"
+    : isMySQL ? "ENUM('ANON','TEAM','GROUP','ADMIN')"
     : "VARCHAR(20) CHECK (role IN ('ANON','TEAM','GROUP','ADMIN'))";
-  const enumAccess = isMySQL
-    ? "ENUM('ANON','TEAM','GROUP','ADMIN')"
+  const enumAccess = isD1 ? "TEXT CHECK (access_role IN ('ANON','TEAM','GROUP','ADMIN'))"
+    : isMySQL ? "ENUM('ANON','TEAM','GROUP','ADMIN')"
     : "VARCHAR(20) CHECK (access_role IN ('ANON','TEAM','GROUP','ADMIN'))";
+
+  const varchar = (n: number) => isD1 ? 'TEXT' : `VARCHAR(${n})`;
 
   await query(`
     CREATE TABLE IF NOT EXISTS fs_members (
-      id          ${autoInc} PRIMARY KEY,
-      email       VARCHAR(255) NOT NULL UNIQUE,
-      name        VARCHAR(255) NOT NULL,
+      id          ${autoInc}${pkSuffix},
+      email       ${varchar(255)} NOT NULL UNIQUE,
+      name        ${varchar(255)} NOT NULL,
       role        ${enumRole} DEFAULT 'TEAM',
-      grp         VARCHAR(100),
+      grp         ${varchar(100)},
       created_at  ${timestamp},
       updated_at  ${timestamp} ${onUpdate}
     )
@@ -110,14 +149,14 @@ export async function initSchema() {
 
   await query(`
     CREATE TABLE IF NOT EXISTS fs_calendar (
-      id            ${autoInc} PRIMARY KEY,
-      title         VARCHAR(500) NOT NULL,
+      id            ${autoInc}${pkSuffix},
+      title         ${varchar(500)} NOT NULL,
       description   TEXT,
-      event_date    DATE NOT NULL,
-      event_time    VARCHAR(5) NOT NULL,
-      duration_min  INT DEFAULT 60,
+      event_date    ${isD1 ? 'TEXT' : 'DATE'} NOT NULL,
+      event_time    ${varchar(5)} NOT NULL,
+      duration_min  INTEGER DEFAULT 60,
       attendees     TEXT,
-      created_by    VARCHAR(255),
+      created_by    ${varchar(255)},
       created_at    ${timestamp}
     )
   `);
@@ -131,13 +170,13 @@ export async function initSchema() {
 
   await query(`
     CREATE TABLE IF NOT EXISTS fs_chat_logs (
-      id          ${autoInc} PRIMARY KEY,
-      session_id  VARCHAR(64) NOT NULL,
-      provider    VARCHAR(50) NOT NULL,
-      model       VARCHAR(100) NOT NULL,
-      role        VARCHAR(20) NOT NULL,
+      id          ${autoInc}${pkSuffix},
+      session_id  ${varchar(64)} NOT NULL,
+      provider    ${varchar(50)} NOT NULL,
+      model       ${varchar(100)} NOT NULL,
+      role        ${varchar(20)} NOT NULL,
       content     TEXT NOT NULL,
-      tokens      INT DEFAULT 0,
+      tokens      INTEGER DEFAULT 0,
       created_at  ${timestamp}
     )
   `);
@@ -146,15 +185,15 @@ export async function initSchema() {
 
   await query(`
     CREATE TABLE IF NOT EXISTS fs_files (
-      id          ${autoInc} PRIMARY KEY,
-      name        VARCHAR(500) NOT NULL,
-      path        VARCHAR(1000) NOT NULL,
-      file_size   BIGINT,
-      mime_type   VARCHAR(255),
-      uploaded_by VARCHAR(255),
+      id          ${autoInc}${pkSuffix},
+      name        ${varchar(500)} NOT NULL,
+      path        ${varchar(1000)} NOT NULL,
+      file_size   ${isD1 ? 'INTEGER' : 'BIGINT'},
+      mime_type   ${varchar(255)},
+      uploaded_by ${varchar(255)},
       access_role ${enumAccess} DEFAULT 'TEAM',
-      grp         VARCHAR(100),
-      r2_url      VARCHAR(2000),
+      grp         ${varchar(100)},
+      r2_url      ${varchar(2000)},
       created_at  ${timestamp}
     )
   `);
@@ -200,15 +239,16 @@ export async function addEvent(e: { title: string; description?: string; date: s
 export async function listEvents(opts?: { date?: string; week?: boolean }) {
   const db = config.get('db') as any as DbConfig;
   const isMySQL = db.type === 'mysql';
+  const isD1 = db.type === 'd1';
 
   if (opts?.date) {
     return query('SELECT * FROM fs_calendar WHERE event_date = ? ORDER BY event_time', [opts.date]);
   }
   if (opts?.week) {
-    const weekEnd = isMySQL
-      ? 'DATE_ADD(CURDATE(), INTERVAL 7 DAY)'
+    const weekEnd = isD1 ? "date('now', '+7 days')"
+      : isMySQL ? 'DATE_ADD(CURDATE(), INTERVAL 7 DAY)'
       : "CURRENT_DATE + INTERVAL '7 days'";
-    const curDate = isMySQL ? 'CURDATE()' : 'CURRENT_DATE';
+    const curDate = isD1 ? "date('now')" : isMySQL ? 'CURDATE()' : 'CURRENT_DATE';
     return query(`SELECT * FROM fs_calendar WHERE event_date BETWEEN ${curDate} AND ${weekEnd} ORDER BY event_date, event_time`);
   }
   return query('SELECT * FROM fs_calendar ORDER BY event_date DESC, event_time LIMIT 50');
@@ -256,21 +296,19 @@ export async function addChatLog(log: {
 export async function listChatSessions(limit = 20) {
   const db = config.get('db') as any as DbConfig;
   const isMySQL = db.type === 'mysql';
+  const isD1 = db.type === 'd1';
 
-  if (isMySQL) {
-    return query(
-      `SELECT session_id, provider, model, MIN(created_at) as started_at,
-              COUNT(*) as msg_count,
-              SUBSTRING(MIN(CASE WHEN role='user' THEN content END), 1, 100) as first_msg
-       FROM fs_chat_logs GROUP BY session_id, provider, model
-       ORDER BY started_at DESC LIMIT ?`,
-      [limit],
-    );
-  }
+  const substr = isMySQL ? 'SUBSTRING' : isD1 ? 'substr' : 'LEFT';
+  const substrExpr = isMySQL
+    ? "SUBSTRING(MIN(CASE WHEN role='user' THEN content END), 1, 100)"
+    : isD1
+    ? "substr(MIN(CASE WHEN role='user' THEN content END), 1, 100)"
+    : "LEFT(MIN(CASE WHEN role='user' THEN content END), 100)";
+
   return query(
     `SELECT session_id, provider, model, MIN(created_at) as started_at,
             COUNT(*) as msg_count,
-            LEFT(MIN(CASE WHEN role='user' THEN content END), 100) as first_msg
+            ${substrExpr} as first_msg
      FROM fs_chat_logs GROUP BY session_id, provider, model
      ORDER BY started_at DESC LIMIT ?`,
     [limit],

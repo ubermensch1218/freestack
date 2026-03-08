@@ -23,16 +23,127 @@ teamCommand
       name: 'dbType',
       message: 'DB 엔진 선택:',
       choices: [
-        { name: `MySQL       - Oracle VM에 직접 설치 (빠름)`, value: 'mysql' },
-        { name: `PostgreSQL  - Oracle VM에 직접 설치`, value: 'postgres' },
-        { name: `Neon        - 서버리스 Postgres (neon.tech, 무료 0.5GB)`, value: 'neon' },
+        { name: `Cloudflare D1 - 서버리스 SQLite (무료 5GB, 서버 불필요) ${chalk.green('추천')}`, value: 'd1' },
+        { name: `MySQL         - Oracle VM에 직접 설치 (빠름)`, value: 'mysql' },
+        { name: `PostgreSQL    - Oracle VM에 직접 설치`, value: 'postgres' },
+        { name: `Neon          - 서버리스 Postgres (neon.tech, 무료 0.5GB)`, value: 'neon' },
       ],
-      default: existing?.type || 'mysql',
+      default: existing?.type || 'd1',
     }]);
 
     let dbConfig: any = { type: dbType };
 
-    if (dbType === 'neon') {
+    if (dbType === 'd1') {
+      ui.info('Cloudflare D1 무료 티어: 5GB 스토리지, 5M reads/day, 100K writes/day');
+      ui.info('서버 없이 Cloudflare API로 직접 쿼리합니다.');
+      console.log();
+
+      // Try to reuse Cloudflare keys from config
+      const cfConfig = config.get('cloudflare') as any;
+      const existingKeys = config.get('keys') as any;
+
+      const d1Answers = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'accountId',
+          message: 'Cloudflare Account ID:',
+          default: existing?.d1AccountId || cfConfig?.accountId || existingKeys?.cloudflareAccountId,
+          validate: (v: string) => !!v || 'Account ID 필수',
+        },
+        {
+          type: 'input',
+          name: 'apiToken',
+          message: 'Cloudflare API Token (D1 권한 포함):',
+          default: existing?.d1ApiToken || cfConfig?.apiToken || existingKeys?.cloudflare,
+          validate: (v: string) => !!v || 'API Token 필수',
+        },
+      ]);
+
+      // List existing D1 databases or create new one
+      const listSpinner = ora('D1 데이터베이스 조회 중...').start();
+      try {
+        const listRes = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${d1Answers.accountId}/d1/database`,
+          { headers: { 'Authorization': `Bearer ${d1Answers.apiToken}` } },
+        );
+        const listJson = await listRes.json() as any;
+        listSpinner.stop();
+
+        if (!listJson.success) throw new Error(listJson.errors?.[0]?.message || 'API 오류');
+
+        const databases = listJson.result || [];
+        const fsDb = databases.find((d: any) => d.name === 'freestack');
+
+        let databaseId: string;
+
+        if (fsDb) {
+          ui.success(`기존 D1 DB 발견: freestack (${fsDb.uuid})`);
+          databaseId = fsDb.uuid;
+        } else {
+          const { createNew } = await inquirer.prompt([{
+            type: 'confirm',
+            name: 'createNew',
+            message: 'freestack D1 데이터베이스를 새로 생성할까요?',
+            default: true,
+          }]);
+
+          if (createNew) {
+            const createSpinner = ora('D1 데이터베이스 생성 중...').start();
+            const createRes = await fetch(
+              `https://api.cloudflare.com/client/v4/accounts/${d1Answers.accountId}/d1/database`,
+              {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${d1Answers.apiToken}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ name: 'freestack' }),
+              },
+            );
+            const createJson = await createRes.json() as any;
+            if (!createJson.success) throw new Error(createJson.errors?.[0]?.message || '생성 실패');
+            databaseId = createJson.result.uuid;
+            createSpinner.succeed(`D1 DB 생성 완료: freestack (${databaseId})`);
+          } else {
+            // Choose from existing
+            if (!databases.length) {
+              ui.error('기존 D1 DB가 없습니다. 생성을 선택해주세요.');
+              return;
+            }
+            const { selectedDb } = await inquirer.prompt([{
+              type: 'list',
+              name: 'selectedDb',
+              message: '사용할 D1 DB 선택:',
+              choices: databases.map((d: any) => ({ name: `${d.name} (${d.uuid.substring(0, 8)}...)`, value: d.uuid })),
+            }]);
+            databaseId = selectedDb;
+          }
+        }
+
+        dbConfig = {
+          type: 'd1',
+          d1AccountId: d1Answers.accountId,
+          d1ApiToken: d1Answers.apiToken,
+          d1DatabaseId: databaseId,
+        };
+      } catch (e: any) {
+        listSpinner.stop();
+        ui.error(`D1 API 오류: ${e.message}`);
+        ui.info('Cloudflare Dashboard > D1에서 직접 생성 후 UUID를 입력하세요.');
+        const { manualId } = await inquirer.prompt([{
+          type: 'input',
+          name: 'manualId',
+          message: 'D1 Database UUID:',
+        }]);
+        if (!manualId) return;
+        dbConfig = {
+          type: 'd1',
+          d1AccountId: d1Answers.accountId,
+          d1ApiToken: d1Answers.apiToken,
+          d1DatabaseId: manualId,
+        };
+      }
+    } else if (dbType === 'neon') {
       ui.info('Neon 무료 티어: 0.5GB 스토리지, 190시간/월 컴퓨트');
       ui.info('가입: https://neon.tech');
       console.log();
@@ -121,10 +232,11 @@ teamCommand
     try {
       await db.testConnection();
       await db.initSchema();
-      spinner.succeed('스키마 생성 완료 (fs_members, fs_calendar, fs_files)');
+      spinner.succeed('스키마 생성 완료 (fs_members, fs_calendar, fs_chat_logs, fs_files)');
     } catch (e: any) {
       spinner.fail(`DB 연결 실패: ${e.message}`);
-      if (dbType === 'neon') ui.info('Connection String을 확인하세요.');
+      if (dbType === 'd1') ui.info('Cloudflare Account ID, API Token, D1 Database UUID를 확인하세요.');
+      else if (dbType === 'neon') ui.info('Connection String을 확인하세요.');
       else ui.info('호스트/포트/인증 정보를 확인하세요. Tailscale VPN 연결 상태도 확인.');
     }
   });

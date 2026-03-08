@@ -16,6 +16,11 @@ const KEY_DEFS = [
   { id: 'cloudflare', name: 'Cloudflare', envVar: 'CLOUDFLARE_API_TOKEN', prefix: '', configPath: 'keys.cloudflare' },
   { id: 'kimi', name: 'Kimi (Moonshot)', envVar: 'MOONSHOT_API_KEY', prefix: 'sk-', configPath: 'keys.kimi' },
   { id: 'glm', name: 'GLM (Zhipu)', envVar: 'ZHIPU_API_KEY', prefix: '', configPath: 'keys.glm' },
+  { id: 'xBearerToken', name: 'X/Twitter Bearer', envVar: 'X_BEARER_TOKEN', prefix: '', configPath: 'keys.xBearerToken' },
+  { id: 'braveSearch', name: 'Brave Search', envVar: 'BRAVE_API_KEY', prefix: '', configPath: 'keys.braveSearch' },
+  { id: 'githubToken', name: 'GitHub Token', envVar: 'GITHUB_TOKEN', prefix: 'ghp_', configPath: 'keys.githubToken' },
+  { id: 'todoistToken', name: 'Todoist', envVar: 'TODOIST_API_TOKEN', prefix: '', configPath: 'keys.todoistToken' },
+  { id: 'discordBot', name: 'Discord Bot', envVar: 'DISCORD_BOT_TOKEN', prefix: '', configPath: 'keys.discordBot' },
 ] as const;
 
 export type KeyId = typeof KEY_DEFS[number]['id'];

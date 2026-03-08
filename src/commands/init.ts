@@ -243,19 +243,22 @@ export const initCommand = new Command('init')
 
     // Next steps
     ui.heading('다음 단계');
+    let step = 1;
+    ui.info(`${step++}. ${chalk.cyan('freestack team setup')} - 데이터베이스 설정 (Cloudflare D1 추천 — 무료 서버리스)`);
     const domain = config.get('domain');
     if (keys.cloudflare && domain) {
-      ui.info(`1. ${chalk.cyan('freestack dns setup')} - DNS + Email Routing 설정`);
+      ui.info(`${step++}. ${chalk.cyan('freestack dns setup')} - DNS + Email Routing 설정`);
     }
     if (keys.resend) {
-      ui.info(`2. ${chalk.cyan('freestack dns resend-verify')} - Resend 도메인 DNS 자동 등록`);
+      ui.info(`${step++}. ${chalk.cyan('freestack dns resend-verify')} - Resend 도메인 DNS 자동 등록`);
     }
     if (keys.anthropic || keys.telegram || keys.slack) {
-      ui.info(`3. ${chalk.cyan('freestack openclaw deploy')} - AI 비서 배포`);
+      ui.info(`${step++}. ${chalk.cyan('freestack openclaw deploy')} - AI 비서 배포`);
     }
     if (keys.tailscale) {
-      ui.info(`4. ${chalk.cyan('freestack vpn setup')} - VPN 설정`);
+      ui.info(`${step++}. ${chalk.cyan('freestack vpn setup')} - VPN 설정`);
     }
+    ui.info(`${step++}. ${chalk.cyan('freestack server capacity')} - 리전별 무료 VM 가용 여부 조회`);
     ui.info(`   ${chalk.cyan('freestack status')} - 전체 현황 보기`);
   });
 

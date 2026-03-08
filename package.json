@@ -6,10 +6,23 @@
   "bin": {
     "freestack": "./dist/index.js"
   },
+  "files": [
+    "dist/**/*"
+  ],
+  "keywords": ["startup", "free-tier", "cloud", "cli", "workspace", "openclaw", "ai-agent"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ubermensch1218/freestack.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "prepublishOnly": "tsc"
   },
   "dependencies": {
     "@types/pg": "^8.18.0",

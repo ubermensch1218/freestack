@@ -138,6 +138,93 @@ export function getInstancePublicIp(instanceId: string) {
   return vnics[0]?.['public-ip'] || null;
 }
 
+// ─── Capacity Check (multi-region) ───
+
+export const OCI_REGIONS = [
+  { key: 'ap-chuncheon-1', name: '춘천 (한국)' },
+  { key: 'ap-seoul-1', name: '서울 (한국)' },
+  { key: 'ap-tokyo-1', name: '도쿄 (일본)' },
+  { key: 'ap-osaka-1', name: '오사카 (일본)' },
+  { key: 'us-ashburn-1', name: 'Ashburn (미동부)' },
+  { key: 'us-phoenix-1', name: 'Phoenix (미서부)' },
+  { key: 'us-sanjose-1', name: 'San Jose (미서부)' },
+  { key: 'us-chicago-1', name: 'Chicago (미중부)' },
+  { key: 'eu-frankfurt-1', name: 'Frankfurt (독일)' },
+  { key: 'eu-amsterdam-1', name: 'Amsterdam (네덜란드)' },
+  { key: 'uk-london-1', name: 'London (영국)' },
+  { key: 'ap-singapore-1', name: 'Singapore' },
+  { key: 'ap-mumbai-1', name: 'Mumbai (인도)' },
+  { key: 'ap-sydney-1', name: 'Sydney (호주)' },
+  { key: 'ca-toronto-1', name: 'Toronto (캐나다)' },
+  { key: 'sa-saopaulo-1', name: 'São Paulo (브라질)' },
+];
+
+export interface CapacityResult {
+  region: string;
+  regionName: string;
+  arm: 'AVAILABLE' | 'OUT_OF_HOST_CAPACITY' | 'ERROR';
+  amd: 'AVAILABLE' | 'OUT_OF_HOST_CAPACITY' | 'ERROR';
+}
+
+export async function checkRegionCapacity(regionKey: string): Promise<{ arm: string; amd: string }> {
+  try {
+    // Get availability domain for this region
+    const adResult = execSync(
+      `oci iam availability-domain list --compartment-id ${getOracleConfig().tenancyOcid} --region ${regionKey} --output json 2>/dev/null`,
+      { encoding: 'utf-8', timeout: 15000 },
+    );
+    const ads = JSON.parse(adResult).data;
+    if (!ads?.length) return { arm: 'ERROR', amd: 'ERROR' };
+
+    const ad = ads[0].name;
+    const shapes = JSON.stringify([
+      { instanceShape: 'VM.Standard.A1.Flex', instanceShapeConfig: { ocpus: 4, memoryInGBs: 24 } },
+      { instanceShape: 'VM.Standard.E2.1.Micro' },
+    ]);
+
+    const capResult = execSync(
+      `oci compute compute-capacity-report create --compartment-id ${getOracleConfig().tenancyOcid} --availability-domain "${ad}" --shape-availabilities '${shapes}' --region ${regionKey} --output json 2>/dev/null`,
+      { encoding: 'utf-8', timeout: 15000 },
+    );
+    const report = JSON.parse(capResult).data;
+    const avails = report['shape-availabilities'] || [];
+
+    const armStatus = avails.find((a: any) => a['instance-shape'] === 'VM.Standard.A1.Flex')?.['availability-status'] || 'ERROR';
+    const amdStatus = avails.find((a: any) => a['instance-shape'] === 'VM.Standard.E2.1.Micro')?.['availability-status'] || 'ERROR';
+
+    return { arm: armStatus, amd: amdStatus };
+  } catch {
+    return { arm: 'ERROR', amd: 'ERROR' };
+  }
+}
+
+export async function checkAllRegionsCapacity(
+  onProgress?: (done: number, total: number) => void,
+): Promise<CapacityResult[]> {
+  const results: CapacityResult[] = [];
+  // Run 4 at a time to avoid rate limits
+  const batchSize = 4;
+
+  for (let i = 0; i < OCI_REGIONS.length; i += batchSize) {
+    const batch = OCI_REGIONS.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map(async (r) => {
+        const cap = await checkRegionCapacity(r.key);
+        return {
+          region: r.key,
+          regionName: r.name,
+          arm: cap.arm as CapacityResult['arm'],
+          amd: cap.amd as CapacityResult['amd'],
+        };
+      }),
+    );
+    results.push(...batchResults);
+    onProgress?.(Math.min(i + batchSize, OCI_REGIONS.length), OCI_REGIONS.length);
+  }
+
+  return results;
+}
+
 export const FREE_TIER_INFO = {
   compute: {
     arm: {

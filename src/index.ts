@@ -14,6 +14,7 @@ import { filesCommand } from './commands/files.js';
 import { aiCommand } from './commands/ai.js';
 import { doctorCommand } from './commands/doctor.js';
 import { statusCommand } from './commands/status.js';
+import { hubCommand } from './commands/hub.js';
 
 const program = new Command();
 
@@ -35,5 +36,6 @@ program.addCommand(filesCommand);
 program.addCommand(aiCommand);
 program.addCommand(doctorCommand);
 program.addCommand(statusCommand);
+program.addCommand(hubCommand);
 
 program.parse();

@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
-import { checkOciCli, listInstances, getInstancePublicIp, FREE_TIER_INFO } from '../services/oracle.js';
+import { checkOciCli, listInstances, getInstancePublicIp, FREE_TIER_INFO, OCI_REGIONS, checkRegionCapacity, checkAllRegionsCapacity } from '../services/oracle.js';
 import * as ui from '../utils/ui.js';
 
 export const serverCommand = new Command('server')
@@ -110,6 +110,80 @@ serverCommand
       ],
     );
   });
+
+serverCommand
+  .command('capacity')
+  .description('전 세계 리전별 무료 VM 가용 여부 조회')
+  .option('-r, --region <region>', '특정 리전만 조회')
+  .action(async (opts) => {
+    if (!checkOciCli()) {
+      ui.error('OCI CLI가 설치되어 있지 않습니다.');
+      return;
+    }
+
+    if (opts.region) {
+      const spinner = ora(`${opts.region} 조회 중...`).start();
+      const cap = await checkRegionCapacity(opts.region);
+      spinner.stop();
+      const r = OCI_REGIONS.find(r => r.key === opts.region);
+      ui.heading(`${r?.name || opts.region} 가용 여부`);
+      ui.table(
+        ['Shape', '사양', '상태'],
+        [
+          ['ARM A1 Flex', '4 OCPU / 24GB RAM', capColor(cap.arm)],
+          ['AMD Micro', '1/8 OCPU / 1GB RAM', capColor(cap.amd)],
+        ],
+      );
+      return;
+    }
+
+    const spinner = ora('전 세계 16개 리전 스캔 중... (약 30초)').start();
+    const results = await checkAllRegionsCapacity((done, total) => {
+      spinner.text = `리전 스캔 중... ${done}/${total}`;
+    });
+    spinner.stop();
+
+    ui.heading('Oracle Cloud Free Tier — 리전별 가용 여부');
+    console.log(chalk.gray('  ✅ = 가용  ❌ = 품절  ⚠️  = 조회 실패\n'));
+
+    const available = results.filter(r => r.arm === 'AVAILABLE' || r.amd === 'AVAILABLE');
+    const unavailable = results.filter(r => r.arm !== 'AVAILABLE' && r.amd !== 'AVAILABLE');
+
+    if (available.length) {
+      ui.heading('🟢 자리 있는 리전');
+      ui.table(
+        ['리전', '위치', 'ARM (24GB)', 'AMD Micro (1GB)'],
+        available.map(r => [r.region, r.regionName, capIcon(r.arm), capIcon(r.amd)]),
+      );
+    }
+
+    if (unavailable.length) {
+      console.log();
+      ui.heading('🔴 품절 리전');
+      ui.table(
+        ['리전', '위치', 'ARM (24GB)', 'AMD Micro (1GB)'],
+        unavailable.map(r => [r.region, r.regionName, capIcon(r.arm), capIcon(r.amd)]),
+      );
+    }
+
+    console.log();
+    ui.info('💡 Free Tier는 홈 리전에서만 무료. 가입 시 자리 있는 리전을 선택하세요.');
+    if (available.some(r => r.arm === 'AVAILABLE')) {
+      ui.success('ARM A1 Flex가 가용한 리전이 있습니다! 가입 시 해당 리전을 홈으로 선택하면 24GB 서버 무료.');
+    }
+  });
+
+function capColor(status: string): string {
+  if (status === 'AVAILABLE') return chalk.green('✅ 가용');
+  if (status === 'OUT_OF_HOST_CAPACITY') return chalk.red('❌ 품절');
+  return chalk.yellow('⚠️  조회 실패');
+}
+
+function capIcon(status: string): string {
+  if (status === 'AVAILABLE') return chalk.green('✅');
+  if (status === 'OUT_OF_HOST_CAPACITY') return chalk.red('❌');
+  return chalk.yellow('⚠️');
+}
 
 function statusColor(state: string): string {
   switch (state) {
