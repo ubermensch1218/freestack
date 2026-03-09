@@ -97,23 +97,29 @@ export async function deploySkillsToWorkspace(ocConfig: any, rt: RuntimeConfig) 
     const configVolume = `/var/lib/docker/volumes/${rt.dirName}_${rt.dirName}-config/_data`;
     const skillsDir = `${configVolume}/workspace/skills`;
 
-    execOnServer(ocConfig, `sudo mkdir -p ${skillsDir}`);
-
     for (const inst of installed) {
       const skill = skillRegistry.getById(inst.id);
       if (!skill) continue;
 
       const prompt = skillRegistry.getFilledPrompt(inst.id) || skill.prompt;
-      const content = `# ${skill.emoji} ${skill.name}\n\n${skill.description}\n\n## 프롬프트\n\n${prompt}`;
-      // heredoc으로 안전하게 전달
-      const heredoc = `sudo tee ${skillsDir}/${inst.id}.md > /dev/null << 'SKILLEOF'\n${content}\nSKILLEOF`;
-      execOnServer(ocConfig, heredoc);
-    }
+      // Nanobot 스킬 형식: skills/<name>/SKILL.md
+      const skillDir = `${skillsDir}/${inst.id}`;
+      execOnServer(ocConfig, `sudo mkdir -p ${skillDir}`);
 
-    // 마스터 프롬프트
-    const masterPrompt = skillRegistry.exportMasterPrompt();
-    if (masterPrompt) {
-      const heredoc = `sudo tee ${configVolume}/workspace/SKILLS.md > /dev/null << 'SKILLEOF'\n${masterPrompt}\nSKILLEOF`;
+      const content = `---
+name: ${inst.id}
+description: "${skill.description}"
+version: ${skill.version}
+---
+
+# ${skill.emoji} ${skill.name}
+
+${skill.description}
+
+## 프롬프트
+
+${prompt}`;
+      const heredoc = `sudo tee ${skillDir}/SKILL.md > /dev/null << 'SKILLEOF'\n${content}\nSKILLEOF`;
       execOnServer(ocConfig, heredoc);
     }
 

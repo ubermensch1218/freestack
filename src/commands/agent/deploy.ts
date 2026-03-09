@@ -52,6 +52,44 @@ export const CLOUD_OPTIONS = [
 
 // ─── Cloud pricing info ───
 
+function deployBootstrapFiles(ocConfig: any, rt: RuntimeConfig) {
+  const configVolume = `/var/lib/docker/volumes/${rt.dirName}_${rt.dirName}-config/_data/workspace`;
+  try {
+    execOnServer(ocConfig, `sudo mkdir -p ${configVolume}/memory`);
+
+    // AGENTS.md — 설정 변경 가이드
+    execOnServer(ocConfig, `sudo tee ${configVolume}/AGENTS.md > /dev/null << 'BEOF'
+# 에이전트 설정
+
+## 설정 변경
+너의 설정 파일은 /root/.nanobot/config.json에 있어. filesystem tool로 읽고 쓸 수 있어.
+
+### 모델 변경
+사용자가 "모델 바꿔" 라고 하면:
+1. config.json 읽어서 현재 모델 확인 (agents.defaults.model)
+2. 가능한 모델: glm-4.5-flash(무료), glm-4.5, glm-4.7, glm-5(유료)
+3. 선택하면 agents.defaults.model + agents.defaults.provider 수정
+4. provider 매핑: glm-* → zhipu, claude-* → anthropic, gpt-* → openai
+
+### 프로바이더 키 추가
+키를 받으면 config.json의 providers.<name>.apiKey에 저장
+
+### 스킬 관리
+/root/.nanobot/workspace/skills/ 에 스킬이 있어
+BEOF`);
+
+    // SOUL.md — 성격
+    execOnServer(ocConfig, `sudo tee ${configVolume}/SOUL.md > /dev/null << 'BEOF'
+# 성격
+- 한국어로 대화
+- 간결하고 친절하게
+- 기술적 질문에는 상세하게
+BEOF`);
+  } catch {
+    // bootstrap 실패는 무시 (치명적이지 않음)
+  }
+}
+
 export function showCloudPricing() {
   ui.heading('AI 에이전트 서버 가격 비교');
   console.log();
@@ -498,7 +536,8 @@ export async function deployHomeServer(rt: RuntimeConfig, resumeConfig?: any) {
       execOnServer(currentOcConfig, `cd ~/${rt.dirName} && docker compose restart`);
       patchSpinner.succeed('Nanobot 설정 적용 완료');
 
-      // 스킬 배포
+      // Bootstrap files + 스킬 배포
+      deployBootstrapFiles(currentOcConfig, rt);
       await deploySkillsToWorkspace(currentOcConfig, rt);
     } catch (e: any) {
       patchSpinner.warn(`설정 패치 실패: ${e.message} — 수동 설정 필요`);
