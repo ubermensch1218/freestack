@@ -15,6 +15,13 @@ export const openclawCommand = agentCommand;
 
 function sshExec(ip: string, cmd: string, keyPath?: string, user = 'ubuntu'): string {
   const keyFlag = keyPath ? `-i ${keyPath}` : '';
+  // cmd에 single quote가 포함될 수 있으므로 stdin으로 전달
+  if (cmd.includes("'") || cmd.includes('PYEOF') || cmd.includes('<<')) {
+    return execSync(
+      `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${keyFlag} ${user}@${ip} bash -s`,
+      { encoding: 'utf-8', timeout: 120000, input: cmd },
+    );
+  }
   return execSync(
     `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${keyFlag} ${user}@${ip} '${cmd}'`,
     { encoding: 'utf-8', timeout: 120000 },
@@ -551,6 +558,49 @@ async function deployHomeServer(rt: RuntimeConfig, resumeConfig?: any) {
     return;
   }
 
+  // Nanobot: config.json 직접 패치 (env vars는 무시됨)
+  const currentOcConfig = config.get('openclaw') as any;
+  if (rt.id === 'nanobot') {
+    const patchSpinner = ora('Nanobot 설정 적용 중...').start();
+    try {
+      const allKeys = getAllKeys();
+      execOnServer(currentOcConfig, 'sleep 3');
+
+      const providerMap: Record<string, string> = {};
+      if (allKeys.anthropic) providerMap.anthropic = allKeys.anthropic;
+      if (allKeys.openai) providerMap.openai = allKeys.openai;
+      if (allKeys.glm) providerMap.zhipu = allKeys.glm;
+      if (allKeys.google) providerMap.gemini = allKeys.google;
+      if (allKeys.kimi) providerMap.moonshot = allKeys.kimi;
+
+      let defaultModel = 'glm-4.5-flash';
+      let defaultProvider = 'zhipu';
+      if (allKeys.anthropic) { defaultModel = 'claude-sonnet-4-20250514'; defaultProvider = 'anthropic'; }
+      else if (allKeys.openai) { defaultModel = 'gpt-4o'; defaultProvider = 'openai'; }
+      else if (allKeys.glm) { defaultModel = 'glm-4.5-flash'; defaultProvider = 'zhipu'; }
+      else if (allKeys.google) { defaultModel = 'gemini-2.0-flash'; defaultProvider = 'gemini'; }
+      else if (allKeys.kimi) { defaultModel = 'moonshot-v1-8k'; defaultProvider = 'moonshot'; }
+
+      const telegramOpts = allKeys.telegram ? { token: allKeys.telegram } : undefined;
+      const slackOpts = allKeys.slack && allKeys.slackApp ? { botToken: allKeys.slack, appToken: allKeys.slackApp } : undefined;
+      const discordOpts = allKeys.discordBot ? { token: allKeys.discordBot } : undefined;
+
+      patchNanobotConfig(currentOcConfig, {
+        model: defaultModel,
+        provider: defaultProvider,
+        providers: providerMap,
+        telegram: telegramOpts,
+        slack: slackOpts,
+        discord: discordOpts,
+      });
+
+      execOnServer(currentOcConfig, `cd ~/${rt.dirName} && docker compose restart`);
+      patchSpinner.succeed('Nanobot 설정 적용 완료');
+    } catch (e: any) {
+      patchSpinner.warn(`설정 패치 실패: ${e.message} — 수동 설정 필요`);
+    }
+  }
+
   // Result
   console.log();
   ui.heading(`✅ ${rt.name} 홈서버 배포 완료!`);
@@ -594,6 +644,41 @@ async function deployHomeServer(rt: RuntimeConfig, resumeConfig?: any) {
       sshExec(answers.tailscaleIp, `cd ~/${rt.dirName} && docker compose up -d`,
         undefined, answers.sshUser);
       redeploySpinner.succeed('새 키 반영 완료!');
+
+      // Nanobot: config.json 재패치
+      if (rt.id === 'nanobot') {
+        const rePatchSpinner = ora('Nanobot 설정 재적용 중...').start();
+        try {
+          const latestKeys = getAllKeys();
+          const providerMap2: Record<string, string> = {};
+          if (latestKeys.anthropic) providerMap2.anthropic = latestKeys.anthropic;
+          if (latestKeys.openai) providerMap2.openai = latestKeys.openai;
+          if (latestKeys.glm) providerMap2.zhipu = latestKeys.glm;
+          if (latestKeys.google) providerMap2.gemini = latestKeys.google;
+          if (latestKeys.kimi) providerMap2.moonshot = latestKeys.kimi;
+
+          let dm2 = 'glm-4.5-flash'; let dp2 = 'zhipu';
+          if (latestKeys.anthropic) { dm2 = 'claude-sonnet-4-20250514'; dp2 = 'anthropic'; }
+          else if (latestKeys.openai) { dm2 = 'gpt-4o'; dp2 = 'openai'; }
+          else if (latestKeys.glm) { dm2 = 'glm-4.5-flash'; dp2 = 'zhipu'; }
+          else if (latestKeys.google) { dm2 = 'gemini-2.0-flash'; dp2 = 'gemini'; }
+          else if (latestKeys.kimi) { dm2 = 'moonshot-v1-8k'; dp2 = 'moonshot'; }
+
+          const reOcConfig = config.get('openclaw') as any;
+          patchNanobotConfig(reOcConfig, {
+            model: dm2,
+            provider: dp2,
+            providers: providerMap2,
+            telegram: latestKeys.telegram ? { token: latestKeys.telegram } : undefined,
+            slack: latestKeys.slack && latestKeys.slackApp ? { botToken: latestKeys.slack, appToken: latestKeys.slackApp } : undefined,
+            discord: latestKeys.discordBot ? { token: latestKeys.discordBot } : undefined,
+          });
+          execOnServer(reOcConfig, `cd ~/${rt.dirName} && docker compose restart`);
+          rePatchSpinner.succeed('Nanobot 설정 재적용 완료');
+        } catch (e: any) {
+          rePatchSpinner.warn(`재패치 실패: ${e.message}`);
+        }
+      }
     } catch (e: any) {
       redeploySpinner.warn(`재배포 실패: ${e.message} — freestack agent update 로 재시도`);
     }
@@ -1374,7 +1459,8 @@ function buildDockerCompose(envVars: string[], memLimit?: string, rt?: RuntimeCo
   nanobot:
     image: ${r.image}
     container_name: nanobot
-    command: gateway
+    entrypoint: ["/usr/local/bin/nanobot"]
+    command: ["gateway"]
     restart: unless-stopped
     ports:
       - "${r.port}:${r.port}"
@@ -1412,6 +1498,68 @@ ${envVars.map(e => `      - ${e}`).join('\n')}
 volumes:
   ${r.dirName}-data:
 `;
+}
+
+// ─── Nanobot config.json 패치 ───
+
+/**
+ * Nanobot config.json을 SSH로 직접 패치 (env vars 대신)
+ * docker volume에 있는 config.json을 python3으로 수정
+ */
+function patchNanobotConfig(ocConfig: any, opts: {
+  model?: string;
+  provider?: string;
+  providers?: Record<string, string>;
+  telegram?: { token: string };
+  slack?: { botToken: string; appToken: string };
+  discord?: { token: string };
+}): void {
+  const configPath = `/var/lib/docker/volumes/nanobot_nanobot-config/_data/config.json`;
+
+  const patches: string[] = [];
+
+  if (opts.model) patches.push(`c["agents"]["defaults"]["model"] = "${opts.model}"`);
+  if (opts.provider) patches.push(`c["agents"]["defaults"]["provider"] = "${opts.provider}"`);
+
+  if (opts.providers) {
+    for (const [prov, key] of Object.entries(opts.providers)) {
+      patches.push(`c["providers"]["${prov}"]["apiKey"] = "${key}"`);
+    }
+  }
+
+  if (opts.telegram) {
+    patches.push(`c["channels"]["telegram"]["enabled"] = True`);
+    patches.push(`c["channels"]["telegram"]["token"] = "${opts.telegram.token}"`);
+    patches.push(`c["channels"]["telegram"]["allowFrom"] = ["*"]`);
+  }
+
+  if (opts.slack) {
+    patches.push(`c["channels"]["slack"]["enabled"] = True`);
+    patches.push(`c["channels"]["slack"]["botToken"] = "${opts.slack.botToken}"`);
+    patches.push(`c["channels"]["slack"]["appToken"] = "${opts.slack.appToken}"`);
+    patches.push(`c["channels"]["slack"]["allowFrom"] = ["*"]`);
+  }
+
+  if (opts.discord) {
+    patches.push(`c["channels"]["discord"]["enabled"] = True`);
+    patches.push(`c["channels"]["discord"]["token"] = "${opts.discord.token}"`);
+    patches.push(`c["channels"]["discord"]["allowFrom"] = ["*"]`);
+  }
+
+  if (patches.length === 0) return;
+
+  const scriptLines = [
+    'import json',
+    `with open("${configPath}") as f:`,
+    '    c = json.load(f)',
+    ...patches,
+    `with open("${configPath}", "w") as f:`,
+    '    json.dump(c, f, indent=2)',
+    'print("OK")',
+  ];
+
+  const heredocScript = scriptLines.join('\n');
+  execOnServer(ocConfig, `sudo python3 << 'PYEOF'\n${heredocScript}\nPYEOF`);
 }
 
 // ─── Status / Logs / Start / Stop / Update ───
@@ -1538,6 +1686,320 @@ agentCommand
   .command('pricing')
   .description('클라우드 서버 가격 비교')
   .action(() => showCloudPricing());
+
+// ─── Config management (Nanobot remote config.json) ───
+
+const configCommand = agentCommand
+  .command('config')
+  .description('에이전트 설정 관리 (모델, 프로바이더, 채널)');
+
+configCommand
+  .command('model')
+  .description('기본 모델 변경')
+  .argument('[model]', '모델명 (예: glm-4.5-flash, claude-sonnet-4-20250514)')
+  .action(async (modelArg?: string) => {
+    const oc = getServerConfig();
+    if (!oc) return;
+    const rt = getSavedRuntime();
+
+    if (rt.id !== 'nanobot') {
+      ui.error('config 명령은 Nanobot 전용입니다.');
+      return;
+    }
+
+    let currentModel = '(알 수 없음)';
+    try {
+      const result = execOnServer(oc, `sudo python3 -c "import json; c=json.load(open('/var/lib/docker/volumes/nanobot_nanobot-config/_data/config.json')); print(c['agents']['defaults'].get('model',''))"`)
+      currentModel = result.trim() || '(미설정)';
+    } catch {}
+
+    let model = modelArg;
+    if (!model) {
+      console.log();
+      ui.info(`현재 모델: ${chalk.cyan(currentModel)}`);
+      console.log();
+
+      const allKeys = getAllKeys();
+      const choices: any[] = [];
+      if (allKeys.glm) {
+        choices.push({ name: 'glm-4.5-flash — Zhipu 무료', value: 'glm-4.5-flash' });
+        choices.push({ name: 'glm-4.5 — Zhipu 유료', value: 'glm-4.5' });
+        choices.push({ name: 'glm-4.7 — Zhipu 유료', value: 'glm-4.7' });
+        choices.push({ name: 'glm-5 — Zhipu 유료 (최신)', value: 'glm-5' });
+      }
+      if (allKeys.anthropic) {
+        choices.push({ name: 'claude-sonnet-4-20250514 — Anthropic', value: 'claude-sonnet-4-20250514' });
+        choices.push({ name: 'claude-haiku-4-5-20251001 — Anthropic 저렴', value: 'claude-haiku-4-5-20251001' });
+      }
+      if (allKeys.openai) {
+        choices.push({ name: 'gpt-4o — OpenAI', value: 'gpt-4o' });
+        choices.push({ name: 'gpt-4o-mini — OpenAI 저렴', value: 'gpt-4o-mini' });
+      }
+      if (allKeys.google) {
+        choices.push({ name: 'gemini-2.0-flash — Google 무료', value: 'gemini-2.0-flash' });
+      }
+      if (allKeys.kimi) {
+        choices.push({ name: 'moonshot-v1-8k — Kimi', value: 'moonshot-v1-8k' });
+      }
+      choices.push({ name: '직접 입력', value: '__custom__' });
+
+      const { selected } = await inquirer.prompt([{
+        type: 'list',
+        name: 'selected',
+        message: '모델 선택:',
+        choices,
+      }]);
+
+      if (selected === '__custom__') {
+        const { custom } = await inquirer.prompt([{
+          type: 'input',
+          name: 'custom',
+          message: '모델명 입력:',
+        }]);
+        model = custom;
+      } else {
+        model = selected;
+      }
+    }
+
+    if (!model) { ui.error('모델명이 필요합니다.'); return; }
+
+    let provider = 'auto';
+    if (model.startsWith('glm-')) provider = 'zhipu';
+    else if (model.startsWith('claude-')) provider = 'anthropic';
+    else if (model.startsWith('gpt-')) provider = 'openai';
+    else if (model.startsWith('gemini-')) provider = 'gemini';
+    else if (model.startsWith('moonshot-')) provider = 'moonshot';
+
+    const spinner = ora(`모델 변경: ${model}...`).start();
+    try {
+      patchNanobotConfig(oc, { model, provider });
+      execOnServer(oc, `cd ~/${rt.dirName} && docker compose restart`);
+      spinner.succeed(`모델 변경 완료: ${chalk.cyan(model)} (provider: ${provider})`);
+    } catch (e: any) {
+      spinner.fail(e.message);
+    }
+  });
+
+configCommand
+  .command('provider')
+  .description('프로바이더 키 관리')
+  .argument('[action]', 'list | add | remove')
+  .action(async (action?: string) => {
+    const oc = getServerConfig();
+    if (!oc) return;
+    const rt = getSavedRuntime();
+
+    if (rt.id !== 'nanobot') {
+      ui.error('config 명령은 Nanobot 전용입니다.');
+      return;
+    }
+
+    if (!action || action === 'list') {
+      const spinner = ora('프로바이더 확인 중...').start();
+      try {
+        const result = execOnServer(oc, `sudo python3 << 'PYEOF'\nimport json\nc=json.load(open('/var/lib/docker/volumes/nanobot_nanobot-config/_data/config.json'))\nfor name, cfg in c.get('providers', {}).items():\n    key = cfg.get('apiKey', '')\n    if key:\n        masked = key[:8] + '...' + key[-4:] if len(key) > 12 else '***'\n        print(f'{name}: {masked}')\n    else:\n        print(f'{name}: (미등록)')\nPYEOF`);
+        spinner.stop();
+        console.log();
+        ui.heading('등록된 프로바이더');
+        console.log(result);
+      } catch (e: any) {
+        spinner.fail(e.message);
+      }
+      return;
+    }
+
+    if (action === 'add') {
+      await collectAllLLMKeys();
+
+      const allKeys = getAllKeys();
+      const providerMap: Record<string, string> = {};
+      if (allKeys.anthropic) providerMap.anthropic = allKeys.anthropic;
+      if (allKeys.openai) providerMap.openai = allKeys.openai;
+      if (allKeys.glm) providerMap.zhipu = allKeys.glm;
+      if (allKeys.google) providerMap.gemini = allKeys.google;
+      if (allKeys.kimi) providerMap.moonshot = allKeys.kimi;
+
+      const spinner = ora('프로바이더 키 적용 중...').start();
+      try {
+        patchNanobotConfig(oc, { providers: providerMap });
+        execOnServer(oc, `cd ~/${rt.dirName} && docker compose restart`);
+        spinner.succeed('프로바이더 키 적용 완료');
+      } catch (e: any) {
+        spinner.fail(e.message);
+      }
+      return;
+    }
+
+    ui.error('사용법: freestack agent config provider [list|add]');
+  });
+
+configCommand
+  .command('channel')
+  .description('채널 설정 (Telegram/Slack/Discord)')
+  .argument('[action]', 'list | add')
+  .action(async (action?: string) => {
+    const oc = getServerConfig();
+    if (!oc) return;
+    const rt = getSavedRuntime();
+
+    if (rt.id !== 'nanobot') {
+      ui.error('config 명령은 Nanobot 전용입니다.');
+      return;
+    }
+
+    if (!action || action === 'list') {
+      const spinner = ora('채널 상태 확인 중...').start();
+      try {
+        const result = execOnServer(oc, `sudo python3 << 'PYEOF'\nimport json\nc=json.load(open('/var/lib/docker/volumes/nanobot_nanobot-config/_data/config.json'))\nfor name in ['telegram', 'slack', 'discord', 'whatsapp', 'email']:\n    ch = c.get('channels', {}).get(name, {})\n    enabled = ch.get('enabled', False)\n    status = 'ON' if enabled else 'OFF'\n    print(f'{name}: {status}')\nPYEOF`);
+        spinner.stop();
+        console.log();
+        ui.heading('채널 상태');
+        console.log(result);
+      } catch (e: any) {
+        spinner.fail(e.message);
+      }
+      return;
+    }
+
+    if (action === 'add') {
+      await collectChannelKeys();
+
+      const allKeys = getAllKeys();
+      const patchOpts: any = {};
+      if (allKeys.telegram) patchOpts.telegram = { token: allKeys.telegram };
+      if (allKeys.slack && allKeys.slackApp) patchOpts.slack = { botToken: allKeys.slack, appToken: allKeys.slackApp };
+      if (allKeys.discordBot) patchOpts.discord = { token: allKeys.discordBot };
+
+      if (Object.keys(patchOpts).length === 0) {
+        ui.warn('채널 토큰이 등록되지 않았습니다.');
+        return;
+      }
+
+      const spinner = ora('채널 설정 적용 중...').start();
+      try {
+        patchNanobotConfig(oc, patchOpts);
+        execOnServer(oc, `cd ~/${rt.dirName} && docker compose restart`);
+        spinner.succeed('채널 설정 적용 완료');
+      } catch (e: any) {
+        spinner.fail(e.message);
+      }
+      return;
+    }
+
+    ui.error('사용법: freestack agent config channel [list|add]');
+  });
+
+configCommand
+  .command('show')
+  .description('현재 에이전트 설정 요약')
+  .action(async () => {
+    const oc = getServerConfig();
+    if (!oc) return;
+    const rt = getSavedRuntime();
+
+    if (rt.id !== 'nanobot') {
+      ui.error('config 명령은 Nanobot 전용입니다.');
+      return;
+    }
+
+    const spinner = ora('설정 조회 중...').start();
+    try {
+      const result = execOnServer(oc, `sudo python3 << 'PYEOF'\nimport json\nc=json.load(open('/var/lib/docker/volumes/nanobot_nanobot-config/_data/config.json'))\nd = c.get('agents',{}).get('defaults',{})\nprint(f'모델: {d.get(\"model\", \"(미설정)\")}')\nprint(f'프로바이더: {d.get(\"provider\", \"auto\")}')\nprint()\nprint('프로바이더 키:')\nfor name, cfg in c.get('providers', {}).items():\n    key = cfg.get('apiKey', '')\n    if key:\n        masked = key[:6] + '...' + key[-4:] if len(key) > 10 else '***'\n        print(f'  {name}: {masked}')\nprint()\nprint('채널:')\nfor name in ['telegram', 'slack', 'discord', 'whatsapp', 'email']:\n    ch = c.get('channels', {}).get(name, {})\n    enabled = ch.get('enabled', False)\n    status = 'ON' if enabled else 'OFF'\n    print(f'  {name}: {status}')\nPYEOF`);
+      spinner.stop();
+      console.log();
+      ui.heading(`${rt.name} 설정`);
+      console.log(result);
+    } catch (e: any) {
+      spinner.fail(e.message);
+    }
+  });
+
+// ─── Skills deploy to workspace ───
+
+agentCommand
+  .command('skills')
+  .description('스킬을 에이전트 workspace에 배포')
+  .option('-l, --list', '배포된 스킬 목록')
+  .action(async (opts) => {
+    const oc = getServerConfig();
+    if (!oc) return;
+    const rt = getSavedRuntime();
+
+    if (rt.id !== 'nanobot') {
+      ui.error('skills 명령은 Nanobot 전용입니다.');
+      return;
+    }
+
+    if (opts.list) {
+      try {
+        const result = execOnServer(oc, `ls -la /var/lib/docker/volumes/nanobot_nanobot-config/_data/workspace/skills/ 2>/dev/null || echo "(스킬 없음)"`);
+        console.log();
+        ui.heading('배포된 스킬');
+        console.log(result);
+      } catch (e: any) {
+        ui.error(e.message);
+      }
+      return;
+    }
+
+    const { getInstalled, getById, getFilledPrompt, exportMasterPrompt } = await import('../services/skill-registry.js');
+    const installed = getInstalled().filter((s: any) => s.enabled);
+
+    if (installed.length === 0) {
+      ui.warn('설치된 스킬이 없습니다.');
+      ui.info(`스킬 설치: ${chalk.cyan('freestack hub install <id>')}`);
+      ui.info(`한번에 설치: ${chalk.cyan('freestack hub setup')}`);
+      return;
+    }
+
+    console.log();
+    ui.heading('스킬 배포');
+    console.log(`  설치된 스킬 ${installed.length}개:`);
+    for (const inst of installed) {
+      const skill = getById(inst.id);
+      if (skill) console.log(`    ${(skill as any).emoji} ${(skill as any).name}`);
+    }
+    console.log();
+
+    const { proceed } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'proceed',
+      message: `${installed.length}개 스킬을 에이전트 workspace에 배포할까요?`,
+      default: true,
+    }]);
+
+    if (!proceed) return;
+
+    const spinner = ora('스킬 배포 중...').start();
+    try {
+      const configVolume = '/var/lib/docker/volumes/nanobot_nanobot-config/_data';
+      const skillsDir = `${configVolume}/workspace/skills`;
+
+      execOnServer(oc, `sudo mkdir -p ${skillsDir}`);
+
+      for (const inst of installed) {
+        const skill = getById(inst.id) as any;
+        if (!skill) continue;
+
+        const prompt = getFilledPrompt(inst.id) || skill.prompt;
+        const content = `# ${skill.emoji} ${skill.name}\n\n${skill.description}\n\n## 프롬프트\n\n${prompt}`;
+        execOnServer(oc, `sudo tee ${skillsDir}/${inst.id}.md << 'SKILLEOF'\n${content}\nSKILLEOF`);
+      }
+
+      const masterPrompt = exportMasterPrompt() as string | undefined;
+      if (masterPrompt) {
+        execOnServer(oc, `sudo tee ${configVolume}/workspace/SKILLS.md << 'SKILLEOF'\n${masterPrompt}\nSKILLEOF`);
+      }
+
+      spinner.succeed(`${installed.length}개 스킬 배포 완료`);
+      console.log();
+      ui.info(`에이전트가 ${chalk.cyan('~/.nanobot/workspace/skills/')} 에서 스킬을 읽습니다.`);
+      ui.info(`텔레그램에서 "스킬 목록 보여줘" 로 확인할 수 있습니다.`);
+    } catch (e: any) {
+      spinner.fail(`스킬 배포 실패: ${e.message}`);
+    }
+  });
 
 // ─── Usecases ───
 
